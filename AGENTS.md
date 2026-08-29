@@ -36,13 +36,14 @@ Build in `starter/`. The evaluator imports `from starter.agent import Agent`, so
 ```
 starter/
 ├── agent.py              exports class Agent — control policy
-├── src/
-│   ├── dialog/state.py   SlotState — accumulate, override, erase
-│   └── retrieval/
-│       ├── interface.py  retrieve() — the frozen seam
-│       └── sparse.py     BM25 over SQLite FTS5
-└── tests/                test_contract, test_override, test_turn_cap
+└── src/
+    ├── dialog/state.py   SlotState — accumulate, override, erase
+    └── retrieval/
+        ├── interface.py  retrieve() — the frozen seam
+        └── sparse.py     BM25 over SQLite FTS5
 ```
+
+There are no agent tests yet. `tests/` at the repo root holds the kit's own evaluator tests.
 
 Full target layout, including files not yet built, is in `SUBMISSION.md`.
 
@@ -70,7 +71,7 @@ Person B does not edit `src/retrieval/`. Person A does not edit `agent.py`. Sepa
 ```bash
 python -m evaluator.local_evaluator          # writes results.json
 python run_eval.py --note "what changed"     # above, plus a row in runs.log
-python -m pytest starter/tests tests -q      # all tests
+python -m pytest tests -q                    # the kit's evaluator tests
 ```
 
 There is no `make` on the Windows dev machine; `run_eval.py` replaces `make eval`.
