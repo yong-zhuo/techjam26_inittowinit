@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 # Vocabulary mirrors the evaluator's intent-card regexes.
 COLORS = ("black", "white", "blue", "red", "pink", "green", "brown", "gray", "grey", "purple", "yellow", "orange")
 MATERIALS = ("cotton", "polyester", "nylon", "leather", "wool", "spandex", "silk", "rayon", "fabric")
-CONTRADICT = ("actually", "instead", "no wait", "rather than", "forget", "not ", "don't want", "scratch that")
+CONTRADICT = ("actually", "instead", "no wait", "rather than", "forget", "don't want", "scratch that")
 
 COLOR_RE = re.compile(r"\b(" + "|".join(COLORS) + r")\b", re.I)
 MATERIAL_RE = re.compile(r"\b(" + "|".join(MATERIALS) + r")\b", re.I)
