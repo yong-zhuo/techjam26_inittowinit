@@ -28,7 +28,20 @@ Once the customer has disclosed everything they know, the query stops changing �
 
 The fix is what any shopping interface does when you reject a page of results: show the next page. The agent tracks what it has already offered and returns the highest-ranked items the customer has *not* yet seen. The previously-shown set is cleared on an intent override, because a change of mind invalidates prior rejections.
 
-This is not a scoring exploit. It never reads a label, and it cannot show the target "early" by luck — if the target had been in a previously-shown page, the session would already have ended in a hit. It strictly adds coverage that was previously wasted.
+It never reads a label, and it cannot surface the target "early" by luck — had the target been in a previously-shown page, the session would already have ended in a hit.
+
+**But it does inflate MRR, and we measured by how much.** The objection is fair: if the agent has excluded 40 items over earlier turns and the target then lands at position 1, the evaluator records rank 1 for something whose true rank in the unfiltered ranking was 41. MRR is meant to measure ranking quality, and paging conceals the real rank. So we recovered every hit's true unfiltered rank at the turn it was found:
+
+| Measure | Value |
+|---|---|
+| MRR as scored by the evaluator | 0.596835 |
+| MRR recomputed at true unfiltered rank | 0.534539 |
+| **Inflation attributable to paging** | **+0.062297** |
+| Hits that required paging (true rank > 10) | 27 of 195 (14%) |
+
+At MRR's 30% weight, that inflation is `+0.0187` of the `+0.0788` total gain from this change — so **roughly a quarter of the gain is MRR presentation, and three quarters is genuine**: real improvements in Hit@10 and in how early the target is found, neither of which paging can fake.
+
+We keep the behaviour, for two reasons. It is what any real shopping interface does when a customer rejects a page of results, and the alternative it replaces — re-showing ten already-rejected items for six consecutive turns — is indefensible as product behaviour. Both configurations appear in the ablation table, and the true-rank MRR is disclosed above rather than left for a judge to discover.
 
 ---
 
@@ -133,7 +146,13 @@ The catalog is not committed. Download `catalog.jsonl.gz` from the challenge Git
 | `PROFILE_SEED` | `0` | `1` seeds the query with profile preference tags |
 | `DEPTH` | `120` | Candidates requested per turn |
 
-`DEPTH` is not a tuned value. At most 10 items are shown per turn across at most 10 turns, so any value ≥ 100 is equivalent; the score is identical at 100, 120, 200, 500 and 1000.
+`DEPTH` is not finely tuned, and the sensitivity curve is the evidence:
+
+| DEPTH | 20 | 40 | 60 | **80** | 100 | 120 | 200 |
+|---|---|---|---|---|---|---|---|
+| Score | 0.7995 | 0.8081 | 0.8146 | **0.8292** | 0.8292 | 0.8292 | 0.8292 |
+
+The curve saturates at 80 and is exactly flat above it — identical to six decimals at 80, 100, 120, 200, 500 and 1000. It is a saturating curve, not a peak, so there is no fine-grained fitting to the 200 public sessions to transfer badly. The ceiling is structural rather than empirical: at most 10 items are shown per turn over at most 10 turns, so no more than 100 candidates can ever be consumed. The shipped value of 120 sits 50% above the saturation point.
 
 ### Network and cost
 
@@ -150,12 +169,3 @@ The system as measured makes **no network calls at runtime and uses zero LLM tok
 - **Tuned and measured on the 200 public sessions.** The private 800 share the same generator and scenario mix, but no held-out confirmation is possible before submission.
 
 ---
-
-## To be completed
-
-Sections owned by Person A, to be merged before submission: model choice and rationale, `requirements.txt` with pinned versions, `setup.sh`, dense-retrieval and fusion results, reranking cost disclosure (latency mean/p95, tokens, estimated spend), and behaviour without API credentials.
-
-## Team contributions
-
-- **Person A** — retrieval: BM25 index, dense retrieval, fusion, reranking, index build.
-- **Person B** — dialogue: control policy, state tracking, query construction, clarification policy, guardrails, evaluation and failure analysis.
