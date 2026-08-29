@@ -17,23 +17,38 @@ Efficiency     = clip((11 - MTTC) / 10, 0, 1)
 - **MRR** — reciprocal of its rank (1st = 1.0, 5th = 0.2)
 - **MTTC** — mean turn at which the target *first* appeared. A miss counts as turn 11
 
-**Baseline to beat:** `Hit@10 = 0.125`, `MRR = 0.068034`, `MTTC = 9.81`
+**Baseline:** `Hit@10 = 0.125`, `MRR = 0.068034`, `MTTC = 9.81`, score `0.10671`.
 
-### The arithmetic that drives all prioritization
+### The measurement that sets all priorities
 
-Misses are assigned turn 11. Working backwards from the baseline:
+The evaluator only reveals new information when the agent asks. `local_evaluator.py:170` — if `ask_attribute` is `None`, the simulated customer replies *"Ask me about one specific attribute"* and discloses nothing. The starter never asks, so it gets turn-1 information and then nine silent turns. `ask_attribute="other"` (`line 180`) bypasses the type filter and returns the next two undisclosed constraints of any kind.
 
-```
-0.875 × 11        = 9.625
-9.81 - 9.625      = 0.185
-0.185 / 0.125     = 1.48   ← average turn when it does hit
-```
+Measured with a probe agent over the full 200 public sessions, **BM25 only** — no dense retrieval, no fusion, no LLM:
 
-The starter already recommends from turn 1 and hits at turn ~1.5 when it hits at all. Its MTTC of 9.81 is driven almost entirely by an 87.5% miss rate, not by conversational inefficiency.
+| Variant | Hit@10 | MRR | MTTC | Score |
+|---|---|---|---|---|
+| baseline: never ask, message only | 0.1250 | 0.0680 | 9.81 | 0.1067 |
+| never ask, full history | 0.2700 | 0.1514 | 8.60 | 0.2284 |
+| ask `other`, message only | 0.5600 | 0.3992 | 6.14 | 0.4970 |
+| cycle attributes, full history | 0.7950 | 0.5158 | 4.81 | 0.6760 |
+| 3 targeted then `other`, full history | 0.8400 | **0.5651** | 4.40 | 0.7215 |
+| **ask `other`, full history** | **0.8750** | 0.5400 | **3.46** | **0.7504** |
 
-**Consequence: Efficiency is close to a linear function of Hit Rate.** Improving recall improves all three metrics simultaneously. There is no meaningful accuracy-versus-turn-count tradeoff. Roughly 70% of achievable score is retrieval quality.
+These are probe results, not the committed agent. The repo currently scores the baseline.
 
-**When unsure what to work on, work on retrieval.**
+**Consequence.** Two trivial changes — keep a message history, and set `ask_attribute` — are worth roughly 7× the baseline score. Build them first, before any retrieval work.
+
+### Where the headroom is after that
+
+At a score of 0.7504:
+
+| Component | Now | Max | Remaining |
+|---|---|---|---|
+| Hit@10 (50%) | 0.875 | 1.0 | +0.063 |
+| **MRR (30%)** | 0.540 | 1.0 | **+0.138** |
+| Efficiency (20%) | 0.754 | 1.0 | +0.049 |
+
+**MRR becomes the largest lever**, which is what LLM semantic reranking targets. Dense retrieval still matters — it is a stated requirement and buys the remaining Hit@10 — but it is no longer the single dominant win it appeared to be against a baseline that never asked questions.
 
 ### Human judging
 
@@ -41,101 +56,83 @@ The starter already recommends from turn 1 and hits at turn ~1.5 when it hits at
 
 ---
 
+## Files to build
+
+Already done: `agent.py`, `src/dialog/state.py`, `src/retrieval/interface.py`, `src/retrieval/sparse.py`.
+
+| File | Lines | Owner |
+|---|---|---|
+| `src/dialog/query.py` — rewriting + dual-track routing | ~35 | B |
+| `src/index_build.py` — download and embed, idempotent | ~40 | A |
+| `src/retrieval/dense.py` — cosine | ~40 | A |
+| `src/retrieval/fusion.py` — RRF | ~15 | A |
+| `src/retrieval/rerank.py` — listwise LLM + fallback | ~80 | A |
+| `src/obs/cache.py` — disk cache | ~25 | A |
+
+**Ownership.** A owns `src/retrieval/`, `index_build.py`, `cache.py`. B owns `agent.py`, `src/dialog/`. The seam is frozen: `retrieve(query, slots, track, top_k)`.
+
+**Deliberately not built:** structured pre-filter, entropy clarification, faithful explanations, trace logging, unit tests, `eval_tools/` scripts. Reasons in `DESIGN.md`; the evaluator's per-scenario metrics are the regression signal.
+
 ---
 
 ## Phases
 
-### Phase 0 — Setup (0–6h). Both together, do not split.
+### Phase 1 — the cheap win (~4h each, parallel from the start)
 
-| Task | Why |
+| Person B — most of the score lives here | Person A — independent, start immediately |
 |---|---|
-| Fork the kit, `uv sync`, Python 3.10+ | — |
-| Verify the SHA256 checksum | A truncated catalog fails silently |
-| Run the starter, confirm `0.125 / 0.068 / 9.81` | Different numbers mean a broken environment |
-| Read `docs/evaluation_config.json` | Confirm score weights |
-| Read `docs/agent_api_contract.json` | **Authoritative.** Response shape and `ask_attribute` enum |
-| Confirm how the evaluator resolves the agent path | Decides `submission/` wiring. Do not edit evaluator code |
-| **Open the catalog and inspect it** | Is `price` a float or `"$24.99 - $31.50"`? Is `color` a field or only in titles? |
-| Check whether sessions carry scenario labels | Decides whether the scenario table is possible |
-| Inspect the `user_profile` dict from `reset()` | Decides turn-1 strategy |
-| Agree `SlotState` fields and `retrieve()` signature | Freeze them |
-| **Write `.gitignore` before the first commit** | A committed `data/` needs history rewriting to remove |
-| Write the three tests | Contract, turn cap, override |
-| Write `make eval` | Runs the evaluator, appends `{git hash, three numbers, note}` to `runs.log` |
-| Ask organizers what "network disabled" covers | Setup versus runtime. Webinar and Discord both available |
+| `agent.py`: keep a message history | `index_build.py`: `bge-small-en-v1.5`, pinned revision, idempotent |
+| Ask policy as one swappable function | `dense.py`: brute-force cosine, instruction prefix. No FAISS |
+| Guardrails: never-empty, no ask at turn 10, ASIN dedupe and validation | |
 
-**Gate:** baseline reproduced exactly. Tests pass. Interface frozen.
+**Gate: score ≥ 0.70.** Run history and asking as separate eval runs so both are attributable.
 
-**Why six hours.** Catalog inspection decides the slot design. If colour lives only in titles, Person A needs a keyword-extraction pass over 50,000 titles — work to schedule now, not discover at hour 30.
+### Phase 2 — hybrid retrieval and context (~5h each)
 
-### Phase 1 — State and tooling (6–14h). Split here.
+| Person B | Person A |
+|---|---|
+| `query.py`: history + slots → query | `fusion.py`: RRF, `k=60`, weighted by `track` |
+| Dual-track routing, ~10 lines, same file | Measure BM25 vs dense vs fused on Hit@10 |
+| Profile seeding from `user_profile`, behind a flag | Field ablation: title vs title + category |
 
-**Person B:** `SlotState` with accumulation and override; override tests; profile seeding; simple clarification (first unfilled attribute — the entropy version comes in Phase 4); control policy in `agent.py`; scenario evaluator; trace logging.
+Profile seeding rule: an explicitly stated constraint always beats a profile prior. The tags are generic (`fit`, `comfort`, `durability`) and may dilute the query — if it costs score, gate it off and report that.
 
-**Person A:** catalog loading and normalization; title attribute extraction if Phase 0 found colour/material are not fields; BM25 index; `retrieve()` shim using BM25 only so B can integrate against real code.
+**Gate:** dense must move Hit@10 above 0.875. If it does not, keep the simpler system and say so.
 
-**Gate:** full loop runs end to end. Override test passes. Score at or near baseline — nothing is optimized yet.
+### Phase 3 — ranking and adaptation (~6h each)
 
-### Phase 2 — Retrieval (14–28h). Where the score is.
+| Person B | Person A |
+|---|---|
+| **Adaptive ask policy** — detect *"I don't have an additional preference"* and switch from targeted to `other` | `rerank.py`: listwise, one call per rerank, `temperature=0`, prompt with the slot dict not the transcript |
+| Log every adaptive rule that fires | **Selective reranking**: skip turns that add no information, skip when RRF is already confident |
+| `--no-llm` mode, must still beat baseline | RRF fallback, permanent switch on first failure |
+| | `cache.py` — build before iterating on prompts |
 
-**Person A:** embedding pipeline with instruction prefix; `index_build.py`; dense search; RRF; pre-filter with recall guard; recall@500 diagnostic.
+Budget with selective reranking: ~500–800 calls per full run, ~150–200 on a 50-session dev subset.
 
-**Person B:** query rewriting; intent routing; LLM disk cache.
+**Gate:** MRR moves above 0.54. Zero crashed sessions. `--no-llm` still scores well.
 
-**Gate: Hit@10 must clearly beat 0.125.** If not, stop and debug recall@500. Do not proceed to reranking — there is no point tuning a reranker over a candidate set the target never entered.
+### Phase 4 — deliverables (~8h each). 65% of the grade.
 
-**Merge checkpoint.** Run the scenario table.
-
-### Phase 3 — Reranking and guardrails (28–36h)
-
-**Person A:** RankGPT listwise rerank; provider via `RERANK_MODEL`; RRF fallback with permanent switch on first failure.
-
-**Person B:** the four guardrails; `--no-llm` mode.
-
-**Gate:** MRR moved. Zero crashed sessions across 200 dev sessions. `--no-llm` beats baseline.
-
-### Phase 4 — Differentiators (36–42h)
-
-| Build | Time | Note |
-|---|---|---|
-| Entropy clarification | 3h | The differentiator. Organizers named it |
-| Faithful explanations | 45m | Debugging + demo + covers their route |
-| Adaptive parameters | 30m | Three if-statements. Covers Pillar III |
-| Cross-encoder fallback | 1h | **Only if** the hour-36 ablation shows LLM rerank moves MRR a lot |
-
-**Gate at 42h: feature freeze.** Nothing new after this line.
-
-### Phase 5 — Deliverables (42–50h). 65% of the score.
-
-| Task | Who | Time |
-|---|---|---|
-| Ablation table (six eval runs) | B | 1h |
-| Scenario table | B | 1h if labels exist |
-| Failure analysis (read 20 worst sessions) | B | 1h |
-| Cost disclosure — latency mean/p95, tokens, est. cost | B | 30m |
-| README | A | 2h |
-| `setup.sh` + README setup section | A | 30m |
-| Demo video (`rich` trace replay) | Both | 2h |
-| Submission checklist pass | Both | 30m |
-| **Clean clone test** | Both | 1h, at hour 48 |
-
----
+| Person A | Person B |
+|---|---|
+| README: method, model choice, limitations | Ablation table, from the logged runs |
+| Network requirement: setup-time vs runtime | Scenario table, free from the evaluator |
+| `requirements.txt` with exact pins, `setup.sh` | Failure analysis: read the 20 worst sessions |
+| | Cost disclosure: latency mean and p95, tokens, estimated cost |
+| **Both:** demo video, submission checklist, clean clone test | |
 
 ---
 
 ## Verification
 
-### Tests, day one
+The evaluator is the test suite. Run it after every change:
 
-1. **Contract** — construct a response, validate against `docs/agent_api_contract.json`
-2. **Turn cap** — all 200 sessions, assert zero violations
-3. **Override** — scripted contradiction, assert the old slot is `None`
-4. **Determinism** — same session twice, identical output (`temperature=0` + prompt-hash cache)
-5. **Recall ceiling** — is the target in the top 500 *before* reranking? The upper bound on Hit@10
+```bash
+python run_eval.py --note "what changed"
+```
 
-Test 5 is the most useful diagnostic in the project.
-
-Test 3 is the one that matters most in practice: most bugs show up in the score, but a broken override does not — it just makes the number quietly worse while you debug the wrong file.
+Watch the four scenario rows, not just the aggregate. A broken component usually shows up in one scenario while the others hold steady — in aggregate it just looks like "could be better".
 
 ### Debugging order
 
@@ -143,36 +140,37 @@ Never tune the reranker while recall is broken.
 
 | Symptom | Cause | Do not touch |
 |---|---|---|
-| Recall@500 low | Retrieval: embeddings, fusion, over-filtering | The rerank prompt |
-| Hit@10 low, recall fine | Reranker dropping the target | Retrieval |
+| Target never in the candidate set | Retrieval: embeddings, fusion, over-filtering | The rerank prompt |
+| Hit@10 low, candidates fine | Reranker dropping the target | Retrieval |
 | MRR low, Hit@10 fine | Reranker ordering: prompt, context | Retrieval |
-| MTTC high, Hit@10 fine | Asking too many questions | Anything else |
+| MTTC high, Hit@10 fine | Asking too late, or not at all | Anything else |
 | One scenario far below others | That scenario's handler | The global pipeline |
 
-**Invariants.** Hit@10 ≥ MRR, always. Recall@500 ≥ Hit@10, always. A violation is a bug.
+**Invariants.** Hit@10 ≥ MRR, always. A violation is a bug.
 
 ### The three tables
 
-**Ablation** — six eval runs behind feature flags:
+**Ablation** — one row per component, each behind a flag:
 
-| Config | Hit@10 | MRR | MTTC |
-|---|---|---|---|
-| BM25 baseline | 0.125 | 0.068 | 9.81 |
-| + dense retrieval | | | |
-| + RRF | | | |
-| + query rewriting | | | |
-| + LLM rerank | | | |
-| Full system | | | |
+| Config | Hit@10 | MRR | MTTC | Score |
+|---|---|---|---|---|
+| BM25 baseline | 0.125 | 0.068 | 9.81 | 0.1067 |
+| + message history | | | | |
+| + clarification | | | | |
+| + query rewriting | | | | |
+| + dense retrieval | | | | |
+| + RRF fusion | | | | |
+| + LLM rerank | | | | |
+| + adaptive ask | | | | |
+| Full system | | | | |
 
-Every row should move a number. A row that does not is a component that has not earned its place. This is the strongest available evidence of deliberate decision-making, which Technical Execution (35%) rewards.
+Plus the two gated variants: profile seeding on/off, and ask policy `other` vs targeted-then-`other`.
 
-If the cross-encoder was built, add a three-way rerank comparison. Reranking reorders the existing top 30 rather than finding new candidates, so **Hit@10 barely moves and MRR is the column that matters.** Reporting that a local cross-encoder came close to RankGPT at zero API cost is a more interesting finding than "we used an LLM."
+Every row should move a number. A row that does not is a component that has not earned its place — cut it and say why. This is the strongest available evidence of deliberate decision-making, which Technical Execution rewards.
 
-**Scenario** — the final system split four ways. Not required by the rules; it is a debugging tool. In aggregate a broken override looks like "0.48, could be better." Split, it is a `0.11` beside three healthy numbers. If sessions carry no scenario label, substitute: grep traces for sessions where `slots_erased` fired and check whether those hit.
+**Scenario** — the final system split four ways. Free: the evaluator already reports it.
 
-**Failure analysis** — read the 20 worst sessions and categorize: target never in top 500 (recall), retrieved but buried (ranking), override corrupted state (state bug), ran out of turns (control policy). Then three sentences naming the dominant failure mode and what would fix it. Everyone reports their best number; almost nobody reports where they break.
-
----
+**Failure analysis** — read the 20 worst sessions and categorise: target never retrieved, retrieved but buried, override corrupted state, ran out of turns. Then three sentences naming the dominant failure mode and what would fix it.
 
 ---
 
@@ -180,11 +178,11 @@ If the cross-encoder was built, add a three-way rerank comparison. Reranking reo
 
 Cut in this order if you fall behind:
 
-1. Adaptive parameters
-2. Faithful explanations
-3. Entropy clarification → fall back to first-unfilled-attribute
+1. Adaptive ask policy → fixed `other`
+2. Profile seeding
+3. Dense retrieval and RRF → BM25 only
 4. LLM reranking → RRF order
 
-**Never cut:** dense retrieval, RRF, override handling, guardrails, the three tables, README, video, clean clone test.
+**Never cut:** message history, clarification, query rewriting, guardrails, the three tables, README, video, clean clone test.
 
-A submission with dense retrieval, working override handling, a clean ablation table and a sharp README beats one with nine components and no writeup.
+The first two items on the never-cut list are worth 7× the baseline on their own. A submission with those, a clean ablation table and a sharp README beats one with nine components and no writeup.

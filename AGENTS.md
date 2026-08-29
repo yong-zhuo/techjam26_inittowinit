@@ -61,7 +61,7 @@ Frozen after Phase 0. `SlotState` fields are frozen; its methods are implementat
 
 | | Person A | Person B |
 |---|---|---|
-| Owns | `src/retrieval/`, `index_build.py` | `agent.py`, `src/dialog/`, `src/obs/`, `eval_tools/`, `tests/` |
+| Owns | `src/retrieval/`, `index_build.py`, `src/obs/cache.py` | `agent.py`, `src/dialog/` |
 | Metric | Hit@10, recall@500 | MTTC, zero crashed sessions |
 
 Person B does not edit `src/retrieval/`. Person A does not edit `agent.py`. Separate branches, merge at phase checkpoints. Both run the evaluator independently.
@@ -89,6 +89,7 @@ There is no `make` on the Windows dev machine; `run_eval.py` replaces `make eval
 
 Verified by inspection, not assumed:
 
+- **The customer only reveals information when asked.** `local_evaluator.py:170` — with `ask_attribute = None` the simulator discloses nothing for the whole session. `"other"` (line 180) returns the next two undisclosed constraints of any type. Measured over 200 sessions with BM25 only: keeping a message history and setting `ask_attribute` moves the score from `0.1067` to `0.7504`. Build those before any retrieval work. Full table in `PLAN.md`.
 - **Baseline:** Hit@10 `0.125`, MRR `0.068034`, MTTC `9.81`, composite `0.10671`. Reproduced exactly.
 - **Per scenario:** buying `0.2375` (80 sessions), intent_override `0.1333` (30), browsing `0.025` (80), boundary `0.0` (10). Browsing is 40% of sessions and the largest hole.
 - **Sessions carry `scenario_type` labels**, and the evaluator reports per-scenario metrics for free. The scenario table is possible.
@@ -101,4 +102,4 @@ Verified by inspection, not assumed:
 
 Say something when work departs from `PLAN.md`. Name the drift, name the cost, propose the alternative, then proceed as directed. A confirmed override is a decision, not drift.
 
-Flag when: a phase gate is unmet and work continues anyway (especially Hit@10 below 0.125 with the next task not being recall); a frozen path is being edited; an excluded technology appears; something requires runtime network with no fallback; more than one thing changed between evaluator runs; the frozen interface is being modified; ownership is crossed; presentation time drops below eight hours; a test is skipped, particularly the override test.
+Flag when: a phase gate is unmet and work continues anyway (especially Hit@10 below 0.125 with the next task not being recall); a frozen path is being edited; an excluded technology appears; something requires runtime network with no fallback; more than one thing changed between evaluator runs; the frozen interface is being modified; ownership is crossed; presentation time drops below eight hours; a component is built without an eval run proving it moved a number.
