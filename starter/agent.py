@@ -12,7 +12,7 @@ from starter.src.retrieval.sparse import CATALOG
 MAX_TURNS = 10
 ASK_POLICY = os.getenv("ASK_POLICY", "other")
 EXPLORE = os.getenv("EXPLORE", "1")
-DEPTH = 120
+DEPTH = int(os.getenv("DEPTH", "120"))
 
 
 @dataclass
