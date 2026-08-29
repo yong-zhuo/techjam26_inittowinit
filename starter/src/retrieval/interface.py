@@ -1,16 +1,40 @@
 from __future__ import annotations
 
+import os
+import sys
+
 from starter.src.dialog.state import SlotState
+from starter.src.retrieval.fusion import rrf
 from starter.src.retrieval.sparse import BM25Index
 
-_index: BM25Index | None = None
+RETRIEVAL = os.getenv("RETRIEVAL", "hybrid")
+
+# (sparse, dense) weights; buying is literal, browsing is vague
+WEIGHTS = {"buying": [1.0, 0.15], "browsing": [1.0, 0.40]}
+
+_sparse: BM25Index | None = None
+_dense = None
 
 
 def init(catalog_path: str) -> None:
-    global _index
-    _index = BM25Index(catalog_path)
+    global _sparse, _dense
+    _sparse = BM25Index(catalog_path)
+    _dense = None
+    if RETRIEVAL == "sparse":
+        return
+    try:
+        from starter.src.retrieval.dense import DenseIndex
+
+        _dense = DenseIndex()
+    except Exception as exc:
+        print(f"dense retrieval unavailable ({exc}); using BM25 only", file=sys.stderr)
 
 
 # Retrieval seam: dialog side calls this, retrieval side implements it.
 def retrieve(query: str, slots: SlotState, track: str, top_k: int) -> list[str]:
-    return _index.search(query, top_k)
+    if _dense is None:
+        return _sparse.search(query, top_k)
+    if RETRIEVAL == "dense":
+        return _dense.search(query, top_k)
+    lists = [_sparse.search(query, top_k), _dense.search(query, top_k)]
+    return rrf(lists, WEIGHTS.get(track, [1.0, 0.25]))[:top_k]
