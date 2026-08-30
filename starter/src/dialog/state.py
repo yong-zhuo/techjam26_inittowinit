@@ -12,15 +12,19 @@ COLOR_RE = re.compile(r"\b(" + "|".join(COLORS) + r")\b", re.I)
 MATERIAL_RE = re.compile(r"\b(" + "|".join(MATERIALS) + r")\b", re.I)
 
 
-def extract(message: str) -> dict[str, str]:
-    found: dict[str, str] = {}
-    color = COLOR_RE.search(message)
-    if color:
-        found["color"] = color.group(1).lower()
-    material = MATERIAL_RE.search(message)
-    if material:
-        found["material"] = material.group(1).lower()
+def extract_all(message: str) -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    colors = list(dict.fromkeys(match.lower() for match in COLOR_RE.findall(message)))
+    materials = list(dict.fromkeys(match.lower() for match in MATERIAL_RE.findall(message)))
+    if colors:
+        found["color"] = colors
+    if materials:
+        found["material"] = materials
     return found
+
+
+def extract(message: str) -> dict[str, str]:
+    return {key: values[0] for key, values in extract_all(message).items()}
 
 
 # for dialogue state tracking
@@ -43,16 +47,16 @@ class SlotState:
     def is_override(self, message: str) -> bool:
         lexical = any(cue in message.lower() for cue in CONTRADICT)
         conflict = any(
-            getattr(self, key) is not None and getattr(self, key) != value
-            for key, value in extract(message).items()
+            getattr(self, key) is not None and getattr(self, key) not in values
+            for key, values in extract_all(message).items()
         )
         return lexical or conflict
 
     def erase_conflicting(self, message: str) -> list[str]:
         erased = []
-        for key, value in extract(message).items():
+        for key, values in extract_all(message).items():
             current = getattr(self, key)
-            if current is not None and current != value:
+            if current is not None and current not in values:
                 self.rejected.append(current)
                 setattr(self, key, None)
                 erased.append(key)
