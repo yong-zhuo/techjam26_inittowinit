@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import re
 import sys
@@ -89,9 +90,14 @@ class Agent:
     def __init__(self, catalog_path: str | Path = CATALOG) -> None:
         interface.init(str(catalog_path))
         self._sessions: dict[str, Session] = {}
+        self._catalog_ids: set[str] = set()
+        with Path(catalog_path).open(encoding="utf-8") as handle:
+            for line in handle:
+                self._catalog_ids.add(str(json.loads(line)["parent_asin"]))
         if not _fallback:
             try:
-                _fallback.extend(interface.retrieve("clothing shoes", SlotState(), "browsing", 10))
+                warmup = interface.retrieve("clothing shoes", SlotState(), "browsing", 10)
+                _fallback.extend(asin for asin in warmup if isinstance(asin, str) and asin in self._catalog_ids)
             except Exception as exc:
                 _record("search", exc)
 
@@ -142,7 +148,10 @@ class Agent:
         ranked = self._search(query, session, track, depth)
         if not ranked:
             ranked = self._search(latest, session, track, depth)
-        candidates = [asin for asin in dict.fromkeys(ranked) if isinstance(asin, str) and asin]
+        candidates = [
+            asin for asin in dict.fromkeys(ranked)
+            if isinstance(asin, str) and asin and asin in self._catalog_ids
+        ]
         fresh = [asin for asin in candidates if asin not in session.shown] if EXPLORE == "1" else candidates
         unique = fresh[:count]
         for source in (candidates, session.last_ranked, _fallback):

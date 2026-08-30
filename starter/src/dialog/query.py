@@ -7,7 +7,6 @@ from starter.src.dialog.state import SlotState
 
 PROFILE_SEED = os.getenv("PROFILE_SEED", "0")
 
-SLOT_FIELDS = ("category", "color", "material", "style", "use_case", "brand", "budget")
 BUYING_CUES = re.compile(r"\$|\b\d+(?:\.\d+)?\b|\bsize\b|\bbudget\b|\bbrand\b", re.I)
 
 
@@ -18,8 +17,12 @@ def rewrite(history: list[str], slots: SlotState, profile: dict | None = None) -
     return " ".join(parts)
 
 
+# Slot-count was dropped from this check: only color and material are ever
+# extracted (state.py), so a "filled >= 3" threshold could never be reached
+# and was silently dead code. Widening extraction to make it reachable is the
+# retrieval owner's call - route()'s only consumer is their RRF weighting -
+# so this stays a pure keyword check until that's decided.
 def route(message: str, slots: SlotState) -> str:
-    filled = sum(1 for field in SLOT_FIELDS if getattr(slots, field) is not None)
-    if filled >= 3 or BUYING_CUES.search(message):
+    if BUYING_CUES.search(message):
         return "buying"
     return "browsing"

@@ -168,6 +168,17 @@ Injecting a fault into every third query build, at a 33% failure rate:
 
 The guards are worth `+0.041` under that fault rate, and eliminate empty responses entirely — including on turn 1, where there is no previous ranking to fall back on, via a warm-up ranking captured at startup.
 
+**ASIN validation is now implemented and tested the same way.** Every candidate is checked against the loaded catalog before it can occupy one of the ten returned slots — closing the one guardrail from `AGENTS.md`'s list that had been built but never proven. We tested it against a simulated hallucinating reranker, injecting 3 and then 7 fake IDs (of 10 slots) at the front of the ranking every turn — the position a bad reranker would place them, having judged them "best":
+
+| Poisoning | Hit@10, filter off | Hit@10, filter on | Score, off | Score, on |
+|---|---|---|---|---|
+| 3 of 10 fake | 0.9600 | **0.9650** | **0.801874** | 0.800304 |
+| 7 of 10 fake | 0.9600 | **0.9650** | **0.802080** | 0.800304 |
+
+**Hit@10 is consistently better with the filter on**, at both poisoning levels — the expected mechanism: fake IDs no longer occupy a slot a real candidate could have used. The composite score is very slightly lower with the filter on, by almost exactly the same small amount (`~-0.0017`) regardless of whether 30% or 70% of candidates are hallucinated. That consistency identifies the cause: it is the same MRR-inflation-via-paging effect disclosed below, not a cost that scales with how badly a reranker fails. We ship the filter anyway — Hit@10 is 50% of the score and the mechanism protecting it is unambiguous, while the tiny score offset is bounded, explained, and not a reason to skip basic output validation.
+
+We also found and fixed a related gap while building this test: the warm-up ranking fetched at startup (the very-first-turn fallback) was never itself validated against the catalog. If retrieval were broken from the first call, the fallback could have been poisoned too. It is now filtered the same way as every other candidate list.
+
 ### MRR inflation from paging, disclosed — (sparse)
 
 Never re-showing an item inflates MRR: if 40 items have been excluded over earlier turns and the target then lands at position 1, the evaluator records rank 1 for something whose true unfiltered rank was 41. We recovered every hit's true rank to quantify it:
@@ -234,9 +245,8 @@ The problem statement's "runtime workflow re-orchestration" was interpreted as *
 
 - **Ordering is the bottleneck, and part of it is unreachable.** Five sessions have targets at true ranks 110–315, past the 100 items any 10-turn session can show. Neither reranking nor better dialogue can recover them.
 - **Slot state is inert.** `SlotState` accumulates colour and material and detects overrides, but the query is built from raw message history, so slot values do not currently affect the score at all. It is wired for a reranker that consumes a structured constraint dict.
-- **`route()` is close to a constant.** Across 2000 routing decisions it returns `browsing` 90.7% of the time, and agrees with the evaluator's true scenario label on only 84 of 160 buying/browsing sessions. Its `filled >= 3` branch is **dead code** — only `color` and `material` can ever be filled, so the condition can never be true. Widening this needs `size` and `feature` added to `SlotState`, whose fields are frozen by `AGENTS.md` and require the retrieval owner's agreement.
+- **`route()` is close to a constant.** Across 2000 routing decisions it returns `browsing` 90.7% of the time, and agrees with the evaluator's true scenario label on only 84 of 160 buying/browsing sessions. Its original `filled >= 3` slot-count branch was dead code — only `color` and `material` can ever be filled, so the condition could never be true — and has been removed; `route()` is now a pure keyword check, with identical behaviour (score unchanged at `0.800304`). Making a slot-count signal work would need `size` and `feature` added to `SlotState`, whose fields are frozen by `AGENTS.md`, and `route()`'s only consumer is the retrieval owner's RRF weighting — so that decision belongs to them.
 - **Two override false positives remain, from two different causes.** Multi-material listings were fixed (5 → 2 of 32 detections) by extracting every material in a message and testing membership instead of equality. What remains: (a) a material disclosed across two separate turns — shell on one, lining on another — which a single-valued slot cannot represent; (b) the word *"forget"* appearing in ordinary product prose (a greeting-card description), which trips the lexical override cue. The second is unrelated to materials and needs a narrower cue list.
-- **ASIN validation is not implemented.** Recommendations are deduped and capped, but not checked against the catalog. Harmless while retrieval is the only source of ASINs; it becomes load-bearing the moment an LLM reranker can hallucinate an ID, since each invalid ID consumes one of the ten scored slots.
 - **Attribute extraction covers colour and material only**, by regex over a closed vocabulary. The catalog has no `color` or `material` field — both exist only in free text.
 - **Measured on 200 public sessions with no held-out set.** The private 800 share the same generator and scenario mix. Nothing is fitted to individual sessions, and the one numeric parameter (`DEPTH`) has a saturating rather than peaked sensitivity curve, but transfer cannot be confirmed before submission.
 
@@ -284,9 +294,23 @@ Saturating, not peaked — identical to six decimals at 80 through 1000. The cei
 - **Determinism.** Repeated runs identical to six decimal places.
 - **Frozen paths untouched.** `evaluator/`, `docs/`, `data/`, `tests/` byte-identical to upstream.
 
-### Network and cost
+### Network, latency, and cost
 
-**No runtime network calls and zero LLM tokens.** Reports `prompt_tokens: 0, completion_tokens: 0`. Setup-time network is required once, to download the encoder weights (~130MB) — the same requirement as `pip install`. A full 200-session evaluation takes about 13 seconds after the index is built.
+**No runtime network calls and zero LLM tokens.** Reports `prompt_tokens: 0, completion_tokens: 0`, so estimated cost at any LLM provider's pricing is **$0.00**. Setup-time network is required once, to download the encoder weights (~130MB) — the same requirement as `pip install`.
+
+Per-turn latency, measured across all 578 turns of a full 200-session evaluation on a laptop CPU (dialogue state, query construction, hybrid retrieval, and control policy — no network call in the loop):
+
+| | Latency |
+|---|---|
+| Mean | 32.45 ms |
+| Median (p50) | 30.86 ms |
+| **p95** | **58.76 ms** |
+| p99 | 76.19 ms |
+| Max | 86.20 ms |
+
+A full 200-session evaluation completes in about 27 seconds, including building the SQLite FTS5 index and loading the embedding matrix into memory; it does not include the one-time dense index build (`python -m starter.src.index_build`, ~3 minutes, run once and cached).
+
+If reranking is added on top of this, its latency and token cost are additive to the numbers above and will be disclosed separately once implemented.
 
 ---
 
