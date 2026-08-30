@@ -4,7 +4,6 @@ import os
 import sys
 
 from starter.src.dialog.state import SlotState
-from starter.src.retrieval.cross import rerank as cross_rerank
 from starter.src.retrieval.fusion import rrf
 from starter.src.retrieval.rerank import rerank
 from starter.src.retrieval.sparse import BM25Index
@@ -41,4 +40,8 @@ def retrieve(query: str, slots: SlotState, track: str, top_k: int) -> list[str]:
     else:
         lists = [_sparse.search(query, top_k), _dense.search(query, top_k)]
         ranked = rrf(lists, WEIGHTS.get(track, [1.0, 0.25]))[:top_k]
-    return rerank(query, cross_rerank(query, ranked))
+    return rerank(query, ranked)
+
+
+def catalog_ids() -> set[str]:
+    return _sparse.asins

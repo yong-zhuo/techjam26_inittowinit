@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import json
 import os
 import re
 import sys
@@ -20,6 +19,8 @@ ASK_POLICY = os.getenv("ASK_POLICY", "other")
 EXPLORE = os.getenv("EXPLORE", "1")
 DEPTH = int(os.getenv("DEPTH", "120"))
 RESULTS = os.getenv("RESULTS", "full")
+OVERRIDE_RESET = os.getenv("OVERRIDE_RESET", "1")
+KEEP_TOP = int(os.getenv("KEEP_TOP", "0"))
 
 # Ordered by how often each type appears in the public set: 96%, 76%, 26%, 9%, 4%, 2%.
 ATTRIBUTE_ORDER = ("feature", "material", "color", "style", "size", "use_case")
@@ -92,10 +93,7 @@ class Agent:
     def __init__(self, catalog_path: str | Path = CATALOG) -> None:
         interface.init(str(catalog_path))
         self._sessions: dict[str, Session] = {}
-        self._catalog_ids: set[str] = set()
-        with Path(catalog_path).open(encoding="utf-8") as handle:
-            for line in handle:
-                self._catalog_ids.add(str(json.loads(line)["parent_asin"]))
+        self._catalog_ids = interface.catalog_ids()
         if not _fallback:
             try:
                 warmup = interface.retrieve("clothing shoes", SlotState(), "browsing", 10)
@@ -126,7 +124,7 @@ class Agent:
         if session.last_ask and NO_MORE.match(user_message.strip()):
             session.ask_index += 1
         slots = session.slots
-        if slots.is_override(user_message):
+        if OVERRIDE_RESET == "1" and slots.is_override(user_message):
             slots.erase_conflicting(user_message)
             session.last_ranked = []
             session.shown.clear()
@@ -155,7 +153,8 @@ class Agent:
             if isinstance(asin, str) and asin and asin in self._catalog_ids
         ]
         fresh = [asin for asin in candidates if asin not in session.shown] if EXPLORE == "1" else candidates
-        unique = fresh[:count]
+        # a strong candidate resurfaces even if it was already shown
+        unique = list(dict.fromkeys(candidates[:KEEP_TOP] + fresh))[:count]
         for source in (candidates, session.last_ranked, _fallback):
             for asin in source:
                 if len(unique) >= count:

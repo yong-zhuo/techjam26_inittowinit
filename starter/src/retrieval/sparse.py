@@ -41,6 +41,7 @@ class BM25Index:
     def __init__(self, catalog_path: str | Path = CATALOG) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
+        self.asins: set[str] = set()
         self._build()
 
     def _build(self) -> None:
@@ -54,6 +55,7 @@ class BM25Index:
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
+                self.asins.add(str(product["parent_asin"]))
                 batch.append(
                     (
                         str(product["parent_asin"]),

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Vocabulary mirrors the evaluator's intent-card regexes.
 COLORS = ("black", "white", "blue", "red", "pink", "green", "brown", "gray", "grey", "purple", "yellow", "orange")
@@ -14,6 +15,8 @@ MATERIAL_RE = re.compile(r"\b(" + "|".join(MATERIALS) + r")\b", re.I)
 
 def extract_all(message: str) -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
+    if os.getenv("NO_SLOTS") == "1":
+        return found
     colors = list(dict.fromkeys(match.lower() for match in COLOR_RE.findall(message)))
     materials = list(dict.fromkeys(match.lower() for match in MATERIAL_RE.findall(message)))
     if colors:
@@ -30,14 +33,8 @@ def extract(message: str) -> dict[str, str]:
 # for dialogue state tracking
 @dataclass
 class SlotState:
-    category: str | None = None
     color: str | None = None
     material: str | None = None
-    style: str | None = None
-    use_case: str | None = None
-    brand: str | None = None
-    budget: float | None = None
-    rejected: list[str] = field(default_factory=list)
 
     def update(self, message: str) -> None:
         for key, value in extract(message).items():
@@ -52,12 +49,8 @@ class SlotState:
         )
         return lexical or conflict
 
-    def erase_conflicting(self, message: str) -> list[str]:
-        erased = []
+    def erase_conflicting(self, message: str) -> None:
         for key, values in extract_all(message).items():
             current = getattr(self, key)
             if current is not None and current not in values:
-                self.rejected.append(current)
                 setattr(self, key, None)
-                erased.append(key)
-        return erased
