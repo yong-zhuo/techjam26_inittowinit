@@ -11,8 +11,10 @@ from pathlib import Path
 from starter.src.dialog.query import rewrite, route
 from starter.src.dialog.state import SlotState
 from starter.src.retrieval import interface
+from starter.src.retrieval.rerank import pop_usage
 from starter.src.retrieval.sparse import CATALOG
 
+# Ablation switches, the defaults are the shipped configuration.
 MAX_TURNS = 10
 ASK_POLICY = os.getenv("ASK_POLICY", "other")
 EXPLORE = os.getenv("EXPLORE", "1")
@@ -140,7 +142,7 @@ class Agent:
             "message": phrase(attribute),
             "ask_attribute": attribute,
             "recommendations": [{"parent_asin": asin} for asin in ranked],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            "usage": pop_usage(),
         }
 
     def _rank(self, query: str, latest: str, session: Session, track: str, top_k: int, count: int) -> list[str]:
