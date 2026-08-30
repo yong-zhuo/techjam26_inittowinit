@@ -4,7 +4,9 @@ import os
 import sys
 
 from starter.src.dialog.state import SlotState
+from starter.src.retrieval.cross import rerank as cross_rerank
 from starter.src.retrieval.fusion import rrf
+from starter.src.retrieval.rerank import rerank
 from starter.src.retrieval.sparse import BM25Index
 
 RETRIEVAL = os.getenv("RETRIEVAL", "hybrid")
@@ -33,8 +35,10 @@ def init(catalog_path: str) -> None:
 # Retrieval seam: dialog side calls this, retrieval side implements it.
 def retrieve(query: str, slots: SlotState, track: str, top_k: int) -> list[str]:
     if _dense is None:
-        return _sparse.search(query, top_k)
-    if RETRIEVAL == "dense":
-        return _dense.search(query, top_k)
-    lists = [_sparse.search(query, top_k), _dense.search(query, top_k)]
-    return rrf(lists, WEIGHTS.get(track, [1.0, 0.25]))[:top_k]
+        ranked = _sparse.search(query, top_k)
+    elif RETRIEVAL == "dense":
+        ranked = _dense.search(query, top_k)
+    else:
+        lists = [_sparse.search(query, top_k), _dense.search(query, top_k)]
+        ranked = rrf(lists, WEIGHTS.get(track, [1.0, 0.25]))[:top_k]
+    return rerank(query, cross_rerank(query, ranked))
