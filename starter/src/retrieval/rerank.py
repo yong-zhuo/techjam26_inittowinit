@@ -46,8 +46,16 @@ Reorder ALL candidate numbers, best first.
 Reply with only the numbers, comma-separated. Include every number exactly once."""
 
 _titles: dict[str, str] | None = None
+_catalog = CATALOG
 _usage = {"prompt_tokens": 0, "completion_tokens": 0}
 _live = ENABLED and bool(MODEL)
+
+
+# the harness supplies the catalog path; use it rather than the module default
+def set_catalog(path: str) -> None:
+    global _catalog, _titles
+    if path != _catalog:
+        _catalog, _titles = path, None
 
 
 def describe(product: dict) -> str:
@@ -78,7 +86,7 @@ def _load_titles() -> dict[str, str]:
     global _titles
     if _titles is None:
         _titles = {}
-        with Path(CATALOG).open(encoding="utf-8") as handle:
+        with Path(_catalog).open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
                 _titles[str(product["parent_asin"])] = describe(product)

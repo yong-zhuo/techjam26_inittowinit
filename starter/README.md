@@ -165,7 +165,32 @@ results.
 
 ## Setup and installation
 
-Python 3.11 or newer, developed and measured on 3.12.10. All commands run from the repository root.
+Python 3.11 or newer, developed and measured on 3.12.10.
+
+### From a fresh clone, start to finish
+
+```bash
+git clone <repo-url>
+cd techjam26_inittowinit
+
+python -m venv .venv
+.venv/Scripts/activate            # Windows
+# source .venv/bin/activate       # macOS or Linux
+
+pip install -r requirements.txt
+
+# catalog: download catalog.jsonl.gz from the challenge GitHub Release,
+# decompress to data/catalog.jsonl (50,000 rows)
+
+python -m starter.src.index_build          # encoder + embeddings, ~3 min, once
+cp .env.example .env                       # then paste your API key into .env
+python -m evaluator.local_evaluator        # writes results.json
+```
+
+Expect `0.828623` with a key configured, `0.800304` without. Each step is explained below.
+
+Asset paths resolve against the package rather than the working directory, so the agent can be
+imported and run from anywhere once the index is built.
 
 ### 1. Catalog
 

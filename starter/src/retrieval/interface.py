@@ -5,7 +5,7 @@ import sys
 
 from starter.src.dialog.state import SlotState
 from starter.src.retrieval.fusion import rrf
-from starter.src.retrieval.rerank import rerank
+from starter.src.retrieval.rerank import rerank, set_catalog
 from starter.src.retrieval.sparse import BM25Index
 
 RETRIEVAL = os.getenv("RETRIEVAL", "hybrid")
@@ -19,6 +19,7 @@ _dense = None
 
 def init(catalog_path: str) -> None:
     global _sparse, _dense
+    set_catalog(catalog_path)
     _sparse = BM25Index(catalog_path)
     _dense = None
     if RETRIEVAL == "sparse":

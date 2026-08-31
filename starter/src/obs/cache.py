@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-CACHE_DIR = Path(os.getenv("CACHE_DIR", "starter/assets/llm_cache"))
+CACHE_DIR = Path(os.getenv("CACHE_DIR") or Path(__file__).resolve().parents[2] / "assets" / "llm_cache")
 
 # Off by default: a cached run under-reports token usage, which judges score.
 ENABLED = os.getenv("LLM_CACHE", "0") == "1"
