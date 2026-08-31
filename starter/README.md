@@ -15,31 +15,24 @@ BM25 baseline scores `0.10671`.
 ### Architecture
 
 ```mermaid
-flowchart TB
-    IN([Customer message])
+flowchart LR
+    IN([Customer message]) --> DIA[Dialogue]
+    DIA -- query and track --> RET[Retrieval]
+    RET -- ranked candidates --> CTL[Control]
+    CTL --> OUT([Ten ASINs and a question])
+    OUT -. next turn .-> IN
 
-    subgraph Dialogue
-        H[Message history] --> O[Override detection] --> T[Dual-track routing]
-    end
-
-    subgraph Retrieval
-        B[BM25 sparse] --> F[Rank fusion]
-        D[Dense retrieval] --> F
-        F --> L[Listwise LLM rerank]
-    end
-
-    subgraph Control
-        S[Validation and paging] --> A[Ask policy]
-    end
-
-    IN --> H
-    T --> B
-    T --> D
-    L --> S
-    F -. no key or call fails .-> S
-    A --> OUT([Ten ASINs and ask_attribute])
-    OUT -. next turn .-> H
+    classDef dia fill:#CFE0F5,stroke:#2C5AA0,color:#0F1B2A
+    classDef ret fill:#D6EDD3,stroke:#3C7A3F,color:#0F1F10
+    classDef ctl fill:#F9E4C4,stroke:#A9631A,color:#2A1B08
+    classDef io fill:#FFFFFF,stroke:#5A6A69,color:#131C1B
+    class DIA dia
+    class RET ret
+    class CTL ctl
+    class IN,OUT io
 ```
+
+Each stage is broken out below.
 
 ### Core components
 
@@ -52,6 +45,20 @@ turn and therefore what Dialogue has to work with.
 
 Conversation is turned into a query. The shopper reveals facts only when asked, and never repeats
 one, so this stage exists to capture each fact once and keep it for the rest of the session.
+
+```mermaid
+flowchart LR
+    M([Customer message]) --> H[Append to history]
+    H --> O[Override detection]
+    O --> Q[Query and routing]
+    Q --> X([Query and track])
+    O -. on override .-> R[Clear shown items]
+
+    classDef dia fill:#CFE0F5,stroke:#2C5AA0,color:#0F1B2A
+    classDef io fill:#FFFFFF,stroke:#5A6A69,color:#131C1B
+    class H,O,Q,R dia
+    class M,X io
+```
 
 **Message history.** Every customer message is appended to a list, and the whole list is joined
 into one query string. Each fact is disclosed once and never repeated, so an agent that searches
@@ -71,6 +78,22 @@ and browsing turns lean on meaning.
 
 Turns the query into a ranked candidate list. Two independent routes run over the same query and
 are merged, then the top of the merged list is reordered.
+
+```mermaid
+flowchart LR
+    Q([Query and track]) --> B[BM25 sparse]
+    Q --> D[Dense retrieval]
+    B --> F[Rank fusion]
+    D --> F
+    F --> L[Listwise LLM rerank]
+    L --> X([Ranked candidates])
+    F -. no key or call fails .-> X
+
+    classDef ret fill:#D6EDD3,stroke:#3C7A3F,color:#0F1F10
+    classDef io fill:#FFFFFF,stroke:#5A6A69,color:#131C1B
+    class B,D,F,L ret
+    class Q,X io
+```
 
 **BM25 sparse retrieval.** Reusing the starter agent provided. SQLite FTS5 over seven catalog fields with per-field weights. Because
 disclosed constraints are near-verbatim catalog text, lexical matching is the dominant signal.
@@ -94,6 +117,19 @@ tokens and twice the latency. The single window ships on cost. Reproduce with `R
 Selects what to return and what to ask. This stage decides the shape of the next turn, so it
 closes the loop back into Dialogue.
 
+```mermaid
+flowchart LR
+    C([Ranked candidates]) --> V[Catalog ID validation]
+    V --> P[Unseen-first paging]
+    P --> A[Ask policy]
+    A --> X([Ten ASINs and ask_attribute])
+
+    classDef ctl fill:#F9E4C4,stroke:#A9631A,color:#2A1B08
+    classDef io fill:#FFFFFF,stroke:#5A6A69,color:#131C1B
+    class V,P,A ctl
+    class C,X io
+```
+
 **Catalog ID validation and never-empty guarantee.** Returned identifiers are checked against the
 catalog, then backfilled from the current candidates, the previous ranking, and a warm-up list
 captured at startup. No configuration returns fewer than ten results.
@@ -107,23 +143,10 @@ information, so the query never changes and every turn repeats the first. `"othe
 next two undisclosed constraints of any type, a superset of what any single-attribute question
 returns. This is the largest single contributor to the score.
 
-### Retrieval flow and the offline fallback
+### The offline fallback
 
-```
-query -> BM25 top 120  ----\
-                            >-- reciprocal rank fusion -- top 120
-query -> dense top 120 ----/                |
-                                            v
-                              RERANK_MODEL set and call succeeds?
-                                   |                      |
-                                  yes                     no
-                                   |                      |
-                          listwise LLM rerank      fused order unchanged
-                                   |                      |
-                                   \----------> ten ASINs after paging
-```
-
-The fallback is the fused reciprocal-rank-fusion order. It is a valid ranking, not a crash path,
+The dashed edge in the Retrieval diagram is the fallback: the fused reciprocal-rank-fusion order,
+passed through unchanged when the reranker cannot run. It is a valid ranking, not a crash path,
 but it is measurably weaker than the shipped configuration and is a last resort rather than an
 equivalent mode. Three conditions trigger it:
 
