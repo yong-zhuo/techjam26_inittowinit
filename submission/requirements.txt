@@ -1,0 +1,11 @@
+# CPU wheels for torch
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Dense retrieval and the offline index build.
+numpy==2.5.2
+sentence-transformers==6.0.0
+
+# LLM reranking. Optional: without these, or without RERANK_MODEL set,
+# the agent runs on the fused retrieval order and scores 0.800304.
+litellm==1.98.0
+python-dotenv==1.2.3

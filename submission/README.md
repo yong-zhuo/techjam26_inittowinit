@@ -1,10 +1,5 @@
 # Conversational Retrieval Agent, TechJam 2026 Track 4
 
-> **Repository layout.** The agent lives in `starter/`, which is what `evaluator/local_evaluator.py` imports, so every command below and every number in Results is
-> reproduced from there. `submission/` is the same code packaged in the layout recommended by
-> `docs/submission_rules.md`, with imports and asset paths rewritten to `submission`.
-
-
 ## Problem
 
 A simulated shopper looks for one specific product in a frozen 50,000-item Amazon clothing
@@ -188,10 +183,10 @@ Pulls CPU-only PyTorch, about 200MB rather than 2.5GB. No GPU required.
 ### 3. Embedding index
 
 ```bash
-python -m starter.src.index_build
+python -m submission.src.index_build
 ```
 
-Downloads the encoder (about 130MB) and writes `starter/assets/embeddings.npy` (50000 x 384),
+Downloads the encoder (about 130MB) and writes `submission/assets/embeddings.npy` (50000 x 384),
 `asins.json` and `meta.json`. Needs network once. Idempotent, skips if the index already matches,
 `--force` rebuilds.
 
@@ -245,7 +240,7 @@ To replay one session turn by turn:
 python demo_session.py --scenario intent_override --index 1
 ```
 
-A captured four-turn override session is saved at [`demo_session.txt`](starter/demo_session.txt). It shows
+A captured four-turn override session is saved at [`demo_session.txt`](demo_session.txt). It shows
 the target unreachable on turn 1, ranked first on turn 2, pushed to rank 21 by the override on turn
 3, and recovered to rank 1 on turn 4.
 

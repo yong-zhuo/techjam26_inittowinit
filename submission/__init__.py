@@ -1,0 +1,2 @@
+"""Participant submission package."""
+
