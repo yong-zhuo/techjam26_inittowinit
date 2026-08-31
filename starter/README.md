@@ -54,7 +54,7 @@ turn and therefore what Dialogue has to work with.
 
 #### Dialogue
 
-Turns the conversation into a query. The shopper reveals facts only when asked, and never repeats
+Conversation is turned into a query. The shopper reveals facts only when asked, and never repeats
 one, so this stage exists to capture each fact once and keep it for the rest of the session.
 
 **Message history.** Every customer message is appended to a list, and the whole list is joined
@@ -65,8 +65,7 @@ catalog text.
 
 **Intent override detection.** A lexical cue such as "actually" or "instead" marks an override. The
 agent clears the set of already-shown items but keeps the accumulated query, because the abandoned
-preference still describes the target. Removing this detection is one of the largest single losses
-we measured.
+preference still describes the target.
 
 **Dual-track routing.** Prices, sizes and brand words mark a buying turn, everything else browsing.
 The label selects the fusion weights in the next stage, so buying turns lean on literal matching
@@ -77,19 +76,18 @@ and browsing turns lean on meaning.
 Turns the query into a ranked candidate list. Two independent routes run over the same query and
 are merged, then the top of the merged list is reordered.
 
-**BM25 sparse retrieval.** SQLite FTS5 over seven catalog fields with per-field weights. Because
-disclosed constraints are near-verbatim catalog text, lexical matching is the dominant signal. BM25
-alone reaches recall `1.000` at depth 500.
+**BM25 sparse retrieval.** Reusing the starter agent provided. SQLite FTS5 over seven catalog fields with per-field weights. Because
+disclosed constraints are near-verbatim catalog text, lexical matching is the dominant signal.
 
-**Dense retrieval and fusion.** `BAAI/bge-small-en-v1.5` encodes the query, compared against 50,000
+**Dense retrieval and fusion.** `BAAI/bge-small-en-v1.5` bi-encoder encodes the query, compared against 50,000
 precomputed normalised vectors by exact cosine similarity. The two ranked lists merge with
 reciprocal rank fusion, which combines by rank position because BM25 scores and cosine similarities
 are not on a comparable scale. Fusion weights depend on the track chosen by Dialogue.
 
 **Listwise LLM reranking.** The top 20 candidates are described to the model in one call, numbered,
-and returned as a reordered permutation at `temperature=0`. This is permutation generation, the
+and returned as a reordered permutation at `temperature=0`. This follows permutation generation, the
 core technique from RankGPT (Sun et al., EMNLP 2023, arXiv:2304.09542). Reranking is what moves
-MRR, and it is the only component that requires an API key.
+MRR.
 
 A two-window sliding pass over the top 30, closer to full RankGPT, was measured. It improved Hit@10
 and MTTC but lost MRR, for a net score change within run-to-run variance, at roughly twice the
@@ -173,10 +171,13 @@ Downloads the encoder (about 130MB) and writes `starter/assets/embeddings.npy` (
 `asins.json` and `meta.json`. Needs network once. Idempotent, skips if the index already matches,
 `--force` rebuilds.
 
-Large assets are not committed. They are produced by this documented command and loaded from disk
-at startup rather than recomputed.
+**Required for the shipped configuration.** Hybrid retrieval needs this index. Large assets are not
+committed to the repository; they are produced by this documented command and loaded from disk at
+startup rather than recomputed.
 
-This step is optional. Without it the agent prints a warning and runs BM25 only.
+*Fallback if you skip it or the download fails:* `interface.init` catches the missing index, prints
+a warning naming this command, and the agent runs BM25 sparse retrieval only. The run completes and
+scores, but without the dense route.
 
 ### 4. LLM API key
 
@@ -200,9 +201,10 @@ selects the provider, so `gemini/gemini-3.6-flash` with `GEMINI_API_KEY`, or
 
 A full 200-session evaluation costs about $0.10 on `openai/gpt-4o-mini`.
 
-If no key is available the agent still runs end to end, at the reduced score recorded under
-Results. That path is a safety net so a missing or failing key never breaks a run, not the intended
-configuration.
+*Fallback if you have no key, or a call fails mid-run:* the agent prints one line to stderr and
+ranks on the fused retrieval order instead. The run completes and scores `0.800304` rather than
+`0.828623`, as recorded under Results. This exists so a missing or failing key never breaks a run.
+It is not an equivalent configuration.
 
 ## Reproducing the results
 
@@ -210,8 +212,8 @@ configuration.
 python -m evaluator.local_evaluator
 ```
 
-Writes `results.json` and prints the metrics. With no `.env` present this reproduces the offline
-row. With `RERANK_MODEL` and a key set it reproduces the reranked row.
+Writes `results.json` and prints the metrics. After completing all four setup steps this reproduces
+the shipped row, `0.828623`. Skipping step 4 reproduces the fallback row, `0.800304`.
 
 To replay one session turn by turn:
 
@@ -225,10 +227,12 @@ the target unreachable on turn 1, ranked first on turn 2, pushed to rank 21 by t
 
 ## Results
 
-Both rows are full 200-session runs on the same commit with the response cache disabled, so token
-counts are real rather than replayed.
+The left column is the shipped configuration. The right column is the degraded path taken when no
+API key is available, included so the cost of losing it is on record. Both are full 200-session
+runs on the same commit with the response cache disabled, so token counts are real rather than
+replayed.
 
-| | Reranked | Offline fallback |
+| | Shipped | Fallback, no API key |
 |---|---|---|
 | Model | `openai/gpt-4o-mini` | none |
 | **Score** | **0.828623** | **0.800304** |
