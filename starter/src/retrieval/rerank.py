@@ -19,6 +19,8 @@ except Exception:
 ENABLED = os.getenv("RERANK", "1") != "0"
 MODEL = os.getenv("RERANK_MODEL", "")
 TOP = int(os.getenv("RERANK_TOP", "20"))
+# candidates covered by the sliding pass; equal to TOP means a single window
+DEPTH = int(os.getenv("RERANK_DEPTH", "20"))
 EFFORT = os.getenv("RERANK_EFFORT", "low")
 TITLE_CHARS = 80
 
@@ -131,15 +133,23 @@ def _call(conversation: str, candidates: list[str]) -> str:
     return reply
 
 
+# windows slide back to front so a promoted item can keep climbing
 def rerank(conversation: str, ranked: list[str]) -> list[str]:
     global _live
     if not _live or len(ranked) < 2:
         return ranked
-    window, tail = ranked[:TOP], ranked[TOP:]
-    try:
-        order = parse_order(_call(conversation, window), len(window))
-    except Exception as exc:
-        print(f"rerank disabled ({exc}); using fused order", file=sys.stderr)
-        _live = False
-        return ranked
-    return [window[i] for i in order] + tail
+    depth = min(DEPTH, len(ranked))
+    head, tail = list(ranked[:depth]), ranked[depth:]
+    step = max(1, TOP // 2)
+    for start in reversed(range(0, max(1, depth - TOP + 1), step)):
+        window = head[start:start + TOP]
+        if len(window) < 2:
+            continue
+        try:
+            order = parse_order(_call(conversation, window), len(window))
+        except Exception as exc:
+            print(f"rerank disabled ({exc}); using fused order", file=sys.stderr)
+            _live = False
+            break
+        head[start:start + TOP] = [window[i] for i in order]
+    return head + tail
