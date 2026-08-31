@@ -15,51 +15,47 @@ BM25 baseline scores `0.10671`.
 ### Architecture
 
 ```mermaid
-flowchart TD
-    IN[Customer message]
+flowchart LR
+    IN([Customer message])
 
     subgraph Dialogue
-        H[Message history]
-        O[Override detection]
-        Q[Query construction]
-        T[Buying or browsing routing]
+        direction TB
+        H[Message history] --> O[Override detection] --> Q[Query construction] --> T[Dual-track routing]
     end
 
     subgraph Retrieval
-        B[BM25 over SQLite FTS5]
-        D[Dense bi-encoder]
-        F[Reciprocal rank fusion]
-        L[Listwise LLM rerank]
-        FB[Fused order, offline fallback]
+        direction TB
+        B[BM25 sparse retrieval] --> F[Reciprocal rank fusion]
+        D[Dense Retrieval] --> F
+        F --> L[Listwise LLM rerank]
+        F -. no key or call fails .-> FB[Fused order fallback]
     end
 
     subgraph Control
-        V[Catalog ID validation]
-        P[Unseen-first paging]
-        A[Ask policy]
+        direction TB
+        V[Catalog ID validation] --> P[Unseen-first paging] --> A[Ask policy]
     end
 
-    IN --> H --> O --> Q --> T
+    IN --> H
     T --> B
     T --> D
-    B --> F
-    D --> F
-    F --> L
-    F -. no API key or call fails .-> FB
     L --> V
     FB --> V
-    V --> P --> A
-    A --> OUT[Ten ASINs and ask_attribute]
+    A --> OUT([Ten ASINs and ask_attribute])
     OUT -. next turn .-> IN
 ```
 
 ### Core components
 
-**Ask policy.** The agent sets `ask_attribute="other"` every turn. The simulated shopper discloses
-information only when asked. With `ask_attribute=None` it returns a fixed sentence carrying no
-information, so the query never changes and every turn repeats the first. `"other"` returns the
-next two undisclosed constraints of any type, a superset of what any single-attribute question
-returns. This is the largest single contributor to the score.
+The three stages run in order every turn. Dialogue converts the conversation so far into one search
+query. Retrieval converts that query into a ranked candidate list. Control selects the ten items to
+return and decides what to ask next, which determines what the shopper reveals on the following
+turn and therefore what Dialogue has to work with.
+
+#### Dialogue
+
+Turns the conversation into a query. The shopper reveals facts only when asked, and never repeats
+one, so this stage exists to capture each fact once and keep it for the rest of the session.
 
 **Message history.** Every customer message is appended to a list, and the whole list is joined
 into one query string. Each fact is disclosed once and never repeated, so an agent that searches
@@ -69,11 +65,17 @@ catalog text.
 
 **Intent override detection.** A lexical cue such as "actually" or "instead" marks an override. The
 agent clears the set of already-shown items but keeps the accumulated query, because the abandoned
-preference still describes the target. Removing this costs `0.104` and drops `intent_override`
-Hit@10 from `0.933` to `0.100`.
+preference still describes the target. Removing this detection is one of the largest single losses
+we measured.
 
-**Unseen-first paging.** Items already shown are pushed behind unseen ones, so ten turns of ten
-results reach up to 100 distinct products instead of repeating one page.
+**Dual-track routing.** Prices, sizes and brand words mark a buying turn, everything else browsing.
+The label selects the fusion weights in the next stage, so buying turns lean on literal matching
+and browsing turns lean on meaning.
+
+#### Retrieval
+
+Turns the query into a ranked candidate list. Two independent routes run over the same query and
+are merged, then the top of the merged list is reordered.
 
 **BM25 sparse retrieval.** SQLite FTS5 over seven catalog fields with per-field weights. Because
 disclosed constraints are near-verbatim catalog text, lexical matching is the dominant signal. BM25
@@ -82,18 +84,34 @@ alone reaches recall `1.000` at depth 500.
 **Dense retrieval and fusion.** `BAAI/bge-small-en-v1.5` encodes the query, compared against 50,000
 precomputed normalised vectors by exact cosine similarity. The two ranked lists merge with
 reciprocal rank fusion, which combines by rank position because BM25 scores and cosine similarities
-are not on a comparable scale. Fusion weights depend on the buying or browsing track.
+are not on a comparable scale. Fusion weights depend on the track chosen by Dialogue.
 
 **Listwise LLM reranking.** The top 20 candidates are described to the model in one call, numbered,
 and returned as a reordered permutation at `temperature=0`. This is permutation generation, the
 core technique from RankGPT (Sun et al., EMNLP 2023, arXiv:2304.09542). Reranking is what moves
-MRR, from `0.521` to `0.609`.
+MRR, and it is the only component that requires an API key.
 
 A two-window sliding pass over the top 30, closer to full RankGPT, was measured. It improved Hit@10
-(`0.965` to `0.970`) and MTTC (`2.825` to `2.76`) but lost MRR (`0.609` to `0.592`), for a net
-score change of `-0.0013` at 1.95x the tokens and 1.87x the latency. That difference is smaller
-than the run-to-run variance in Limitations, so the single window ships on cost. Reproduce with
-`RERANK_DEPTH=30`.
+and MTTC but lost MRR, for a net score change within run-to-run variance, at roughly twice the
+tokens and twice the latency. The single window ships on cost. Reproduce with `RERANK_DEPTH=30`.
+
+#### Control
+
+Selects what to return and what to ask. This stage decides the shape of the next turn, so it
+closes the loop back into Dialogue.
+
+**Catalog ID validation and never-empty guarantee.** Returned identifiers are checked against the
+catalog, then backfilled from the current candidates, the previous ranking, and a warm-up list
+captured at startup. No configuration returns fewer than ten results.
+
+**Unseen-first paging.** Items already shown are pushed behind unseen ones, so ten turns of ten
+results reach up to 100 distinct products instead of repeating one page.
+
+**Ask policy.** The agent sets `ask_attribute="other"` every turn. The simulated shopper discloses
+information only when asked. With `ask_attribute=None` it returns a fixed sentence carrying no
+information, so the query never changes and every turn repeats the first. `"other"` returns the
+next two undisclosed constraints of any type, a superset of what any single-attribute question
+returns. This is the largest single contributor to the score.
 
 ### Retrieval flow and the offline fallback
 
@@ -111,8 +129,9 @@ query -> dense top 120 ----/                |
                                    \----------> ten ASINs after paging
 ```
 
-The fallback is the fused reciprocal-rank-fusion order, which is a complete working ranking on its
-own rather than a degraded mode. Three conditions trigger it:
+The fallback is the fused reciprocal-rank-fusion order. It is a valid ranking, not a crash path,
+but it is measurably weaker than the shipped configuration and is a last resort rather than an
+equivalent mode. Three conditions trigger it:
 
 1. `RERANK_MODEL` is unset, which is the state of a fresh clone with no API key. No call is
    attempted and no tokens are used.
@@ -159,9 +178,10 @@ at startup rather than recomputed.
 
 This step is optional. Without it the agent prints a warning and runs BM25 only.
 
-### 4. LLM API key, optional
+### 4. LLM API key
 
-Reranking stays off until a model is configured.
+**Required for the shipped configuration.** Reranking stays off until a model is configured, and
+without it the agent scores `0.028` lower.
 
 ```bash
 cp .env.example .env
@@ -178,8 +198,11 @@ Any [litellm](https://docs.litellm.ai/docs/providers)-supported provider works. 
 selects the provider, so `gemini/gemini-3.6-flash` with `GEMINI_API_KEY`, or
 `groq/llama-3.3-70b-versatile` with `GROQ_API_KEY`, need no code change.
 
-**Without a key the agent runs normally.** No call is attempted, no tokens are used, and ranking
-falls back to the fused retrieval order. Both configurations are measured below.
+A full 200-session evaluation costs about $0.10 on `openai/gpt-4o-mini`.
+
+If no key is available the agent still runs end to end, at the reduced score recorded under
+Results. That path is a safety net so a missing or failing key never breaks a run, not the intended
+configuration.
 
 ## Reproducing the results
 
@@ -221,6 +244,13 @@ counts are real rather than replayed.
 
 Cost uses gpt-4o-mini list rates of $0.15 per 1M input and $0.60 per 1M output tokens, applied to
 the measured counts above. Reranking averages 979 tokens per turn across 558 turns.
+
+**If your token counts come back near zero, check `LLM_CACHE`.** The agent can replay model
+responses from a disk cache keyed on the prompt. It exists so repeated evaluator runs stay
+comparable while tuning, and it is off by default precisely because a cached run reports only the
+tokens it actually spent, understating true cost by orders of magnitude. Every number in the table
+above was produced with it off. Setting `LLM_CACHE=1` reproduces the score far faster and for free,
+but the resulting `reported_token_usage` is not a cost measurement and should not be read as one.
 
 Startup is about 17s in both rows, loading the encoder and the embedding matrix. It is excluded
 from per-turn latency because it happens once per process, not per session.
