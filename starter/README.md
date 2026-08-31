@@ -15,34 +15,30 @@ BM25 baseline scores `0.10671`.
 ### Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     IN([Customer message])
 
     subgraph Dialogue
-        direction TB
-        H[Message history] --> O[Override detection] --> Q[Query construction] --> T[Dual-track routing]
+        H[Message history] --> O[Override detection] --> T[Dual-track routing]
     end
 
     subgraph Retrieval
-        direction TB
-        B[BM25 sparse retrieval] --> F[Reciprocal rank fusion]
-        D[Dense Retrieval] --> F
+        B[BM25 sparse] --> F[Rank fusion]
+        D[Dense retrieval] --> F
         F --> L[Listwise LLM rerank]
-        F -. no key or call fails .-> FB[Fused order fallback]
     end
 
     subgraph Control
-        direction TB
-        V[Catalog ID validation] --> P[Unseen-first paging] --> A[Ask policy]
+        S[Validation and paging] --> A[Ask policy]
     end
 
     IN --> H
     T --> B
     T --> D
-    L --> V
-    FB --> V
+    L --> S
+    F -. no key or call fails .-> S
     A --> OUT([Ten ASINs and ask_attribute])
-    OUT -. next turn .-> IN
+    OUT -. next turn .-> H
 ```
 
 ### Core components
@@ -279,8 +275,7 @@ per evaluation.
   the 100 items any 10-turn session can display. Neither reranking nor better dialogue reaches them.
 - **Attribute extraction covers colour and material only**, by regex over a closed vocabulary. The
   catalog has no `color` or `material` field; both exist in free text only.
-- **Measured on the 200 public sessions with no held-out set.** The private 800 share the same
-  generator and scenario mix, but transfer cannot be confirmed before submission.
+
 
 ## Tech stack
 
@@ -299,6 +294,6 @@ No vector database, no agent framework, no fine-tuning, no training.
 
 ## Team contributions
 
-- **Person A**, retrieval: BM25 index, dense retrieval, RRF fusion, offline index build, reranking.
-- **Person B**, dialogue: control policy, dialogue state tracking, query construction, ask policy,
+- **Yong Zhuo**, retrieval: BM25 index, dense retrieval, RRF fusion, offline index build, reranking.
+- **Christopher**, dialogue: control policy, dialogue state tracking, query construction, ask policy,
   routing, guardrails, evaluation harness, failure analysis.
