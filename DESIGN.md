@@ -43,9 +43,8 @@ One caveat: the submission rules state that for official final scoring, organize
 flowchart TD
     H["Harness calls respond()"] --> S["Slot state<br/><i>accumulate, erase on override</i>"]
     S --> Q["Query rewriting + routing<br/><i>templates and rules only</i>"]
-    Q --> F["Structured pre-filter<br/><i>backs off if pool empties</i>"]
-    F --> B["BM25 sparse<br/><i>keyword matching</i>"]
-    F --> D["Dense retrieval<br/><i>meaning matching</i>"]
+    Q --> B["BM25 sparse<br/><i>keyword matching</i>"]
+    Q --> D["Dense retrieval<br/><i>meaning matching</i>"]
     B --> R["Reciprocal rank fusion"]
     D --> R
     R --> L["Listwise LLM rerank<br/><i>falls back to RRF order</i>"]
@@ -54,7 +53,10 @@ flowchart TD
 ```
 
 Person B owns: slot state, query rewriting, routing, control policy, guardrails, tracing, evaluation tooling.
-Person A owns: pre-filter, BM25, dense retrieval, fusion, reranking, index building.
+Person A owns: BM25, dense retrieval, fusion, reranking, index building.
+
+The structured pre-filter described later in this document was not built. Recall measurement made
+it unnecessary: BM25 alone reaches recall `1.000` at depth 500, so there was no pool to narrow.
 
 **Note on routes.** The problem statement describes keyword, category, and vector as three retrieval routes. Mechanically, category is not a retriever — it produces a set, not a ranking, so it has no rank positions to feed into fusion. It is an upstream filter. Two ranked routes go into RRF.
 
@@ -380,7 +382,9 @@ Name these in the README's future work section with one line each on why they wo
 
 ## Terminology
 
-**Accurate, defensible under questioning:** conversational information retrieval, hybrid retrieval, reciprocal rank fusion, bi-encoder, cross-encoder reranking, listwise reranking, two-stage retrieval, dialogue state tracking, slot filling, intent classification, conversational query rewriting, clarifying question generation, information gain, MRR, Hit Rate@K, deterministic control policy.
+**Accurate, defensible under questioning:** conversational information retrieval, hybrid retrieval, reciprocal rank fusion, bi-encoder, listwise reranking, two-stage retrieval, dialogue state tracking, slot filling, intent classification, conversational query rewriting, clarifying question generation, mixed-initiative clarification, MRR, Hit Rate@K, deterministic control policy.
+
+Cross-encoder reranking was built, measured at `0.782486` against `0.800304` without it, and removed. Say that if asked — it is a stronger answer than listing it as a feature.
 
 **Avoid:** "RAG" (no generation), "fine-tuned" (no training), "agentic" or "autonomous" (control flow is hand-written), "vector database" (numpy array).
 

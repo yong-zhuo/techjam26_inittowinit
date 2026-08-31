@@ -35,12 +35,19 @@ Build in `starter/`. The evaluator imports `from starter.agent import Agent`, so
 
 ```
 starter/
-├── agent.py              exports class Agent — control policy
+├── agent.py                exports class Agent — control policy
 └── src/
-    ├── dialog/state.py   SlotState — accumulate, override, erase
-    └── retrieval/
-        ├── interface.py  retrieve() — the frozen seam
-        └── sparse.py     BM25 over SQLite FTS5
+    ├── index_build.py      offline: writes embeddings.npy + asins.json
+    ├── dialog/
+    │   ├── state.py        SlotState — accumulate, override, erase
+    │   └── query.py        query rewriting and buying/browsing routing
+    ├── retrieval/
+    │   ├── interface.py    retrieve() — the frozen seam
+    │   ├── sparse.py       BM25 over SQLite FTS5
+    │   ├── dense.py        bge-small bi-encoder, brute-force cosine
+    │   ├── fusion.py       reciprocal rank fusion
+    │   └── rerank.py       listwise LLM rerank, falls back to fused order
+    └── obs/cache.py        disk cache keyed on prompt hash
 ```
 
 There are no agent tests yet. `tests/` at the repo root holds the kit's own evaluator tests.
@@ -55,7 +62,7 @@ def retrieve(query: str, slots: SlotState, track: str, top_k: int) -> list[str]:
     """Ranked parent_asins, best first. Never returns an empty list."""
 ```
 
-Frozen after Phase 0. `SlotState` fields are frozen; its methods are implementation and may change. Changing either signature is a conversation, not a commit.
+Frozen after Phase 0. `SlotState` carries `color` and `material`; adding or removing a field, like changing `retrieve()`'s signature, is a conversation, not a commit.
 
 ## Ownership
 

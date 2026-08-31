@@ -1,348 +1,270 @@
-# Conversational Retrieval Agent — TechJam 2026 Track 4
+# Conversational Retrieval Agent, TechJam 2026 Track 4
 
-A multi-turn conversational retrieval system over a frozen 50,000-item Amazon clothing catalog. The agent must surface a hidden target product into a ranked top-10, as high and as early as possible, within 10 turns.
+## Problem
 
-**Current score on the 200 public sessions: `0.800304`** — Hit@10 `0.965`, MRR `0.521012`, MTTC `2.925` — against a provided BM25 baseline of `0.10671`. No LLM, no runtime network, zero tokens, ~13s per full evaluation.
+A simulated shopper looks for one specific product in a frozen 50,000-item Amazon clothing
+catalog, describing it a few facts at a time. Each turn the agent returns ten `parent_asin` values
+and may ask one clarifying question. A session lasts at most 10 turns.
 
----
+Scoring is `0.50 x Hit@10 + 0.30 x MRR + 0.20 x Efficiency`, where
+`Efficiency = clip((11 - MTTC) / 10, 0, 1)` and MTTC is the mean turn of first hit. The provided
+BM25 baseline scores `0.10671`.
 
-## The one measurement that explains the architecture
+## Project overview
 
-Everything below follows from a single property of the benchmark, which we verified by reading the evaluator rather than guessing:
+### Architecture
 
-**The simulated customer knows exactly four facts, and only discloses them when asked.**
+```mermaid
+flowchart TD
+    IN[Customer message]
 
-- If the agent returns `ask_attribute = None`, the customer replies with a fixed sentence containing no information about the target ([`local_evaluator.py:170`](../evaluator/local_evaluator.py#L170)). The starter agent never set that field, so every turn after the first was a repeat of the first.
-- If the agent sets `ask_attribute`, the customer returns up to two undisclosed facts ([`line 178`](../evaluator/local_evaluator.py#L178)).
-- Those facts are drawn from the target product's own `features` and `details` fields — so they are near-verbatim catalog text.
+    subgraph Dialogue
+        H[Message history]
+        O[Override detection]
+        Q[Query construction]
+        T[Buying or browsing routing]
+    end
 
-We measured the supply of facts across all 200 sessions:
+    subgraph Retrieval
+        B[BM25 over SQLite FTS5]
+        D[Dense bi-encoder]
+        F[Reciprocal rank fusion]
+        L[Listwise LLM rerank]
+        FB[Fused order, offline fallback]
+    end
 
-| | Finding |
-|---|---|
-| Facts per session | **Exactly 4, in all 200 sessions** |
-| Turns to extract them all with `other` | **2** |
-| Sessions where new information arrives after turn 2 | **0** |
+    subgraph Control
+        V[Catalog ID validation]
+        P[Unseen-first paging]
+        A[Ask policy]
+    end
 
-This is the fact that shapes the whole design. **Information is exhausted by turn 2; turns 3–10 are a pure ranking and coverage problem.** An architecture that keeps interrogating a customer who has nothing left to say is solving the wrong problem.
-
-The type distribution matters too, because it determines what is worth asking about:
-
-| Fact type | Sessions containing at least one |
-|---|---|
-| `feature` | 96% |
-| `material` | 76% |
-| `color` | 26% |
-| `style` | 9% |
-| `size` | 4% |
-| `use_case` | 2% |
-
-Three of the contract's ten allowed attributes — `brand`, `category`, and effectively `budget` — never carry information in this dataset at all.
-
----
-
-## Architecture, and why each piece is there
-
-```
-customer message
-  → dialogue state        accumulate constraints; detect intent override
-  → query construction    concatenate all disclosed customer text
-  → routing               buying vs browsing, passed to retrieval
-  → retrieval seam:  retrieve(query, slots, track, top_k)
-       ├─ BM25 over SQLite FTS5, field-weighted
-       └─ dense bi-encoder (bge-small-en-v1.5), fused with RRF
-  → control policy        dedupe · validate · unseen-first · never-empty
-  → 10 ASINs + ask_attribute
+    IN --> H --> O --> Q --> T
+    T --> B
+    T --> D
+    B --> F
+    D --> F
+    F --> L
+    F -. no API key or call fails .-> FB
+    L --> V
+    FB --> V
+    V --> P --> A
+    A --> OUT[Ten ASINs and ask_attribute]
+    OUT -. next turn .-> IN
 ```
 
-**Why concatenate raw history rather than build a structured query.** Retrievers have no memory. Handed only the newest message, *"For that, what matters is: black"* searches the entire catalog for black things, having forgotten it was ever about boots. Since the customer's disclosed text is near-verbatim catalog text, concatenating it *is* the query — the most direct possible use of the signal. Worth `0.1067 → 0.2284` on its own.
+### Core components
 
-**Why ask `"other"` every turn rather than choosing an attribute.** See the ask-policy section below; this is measured, and there is also a proof.
+**Ask policy.** The agent sets `ask_attribute="other"` every turn. The simulated shopper discloses
+information only when asked. With `ask_attribute=None` it returns a fixed sentence carrying no
+information, so the query never changes and every turn repeats the first. `"other"` returns the
+next two undisclosed constraints of any type, a superset of what any single-attribute question
+returns. This is the largest single contributor to the score.
 
-**Why never re-show an item already offered.** Once information is exhausted at turn 2, the query stops changing and so does the ranking. Without this, every failing session spent its remaining turns re-showing the same ten rejected items — a real product defect, not just a scoring one. Worth `0.7504 → 0.8292` on the sparse-only system.
+**Message history.** Every customer message is appended to a list, and the whole list is joined
+into one query string. Each fact is disclosed once and never repeated, so an agent that searches
+only the newest message discards what earlier turns obtained. The disclosed text comes from the
+target product's own `features` and `details` fields, so the accumulated query is close to verbatim
+catalog text.
 
-**Why the retrieval seam is frozen.** `retrieve(query, slots, track, top_k)` is the only contact point between dialogue and retrieval. It let the sparse implementation be replaced with a hybrid one, by a different person on a different branch, without a single change to dialogue code.
+**Intent override detection.** A lexical cue such as "actually" or "instead" marks an override. The
+agent clears the set of already-shown items but keeps the accumulated query, because the abandoned
+preference still describes the target. Removing this costs `0.104` and drops `intent_override`
+Hit@10 from `0.933` to `0.100`.
 
-**Why it is deterministic.** Every decision above is hand-written control flow, not model self-planning. It costs zero tokens, is reproducible to six decimal places across runs, and can be explained line by line to a judge asking "why did it do that?".
+**Unseen-first paging.** Items already shown are pushed behind unseen ones, so ten turns of ten
+results reach up to 100 distinct products instead of repeating one page.
 
----
+**BM25 sparse retrieval.** SQLite FTS5 over seven catalog fields with per-field weights. Because
+disclosed constraints are near-verbatim catalog text, lexical matching is the dominant signal. BM25
+alone reaches recall `1.000` at depth 500.
 
-## What we measured
+**Dense retrieval and fusion.** `BAAI/bge-small-en-v1.5` encodes the query, compared against 50,000
+precomputed normalised vectors by exact cosine similarity. The two ranked lists merge with
+reciprocal rank fusion, which combines by rank position because BM25 scores and cosine similarities
+are not on a comparable scale. Fusion weights depend on the buying or browsing track.
 
-Every row below is a real evaluator run on all 200 public sessions, logged to `runs.log` with its commit hash. **Runs marked (sparse) predate the hybrid retrieval merge** and are relative to a `0.750401` or `0.829151` base; runs marked (hybrid) are on the current system.
+**Listwise LLM reranking.** The top 20 candidates are described to the model in one call, numbered,
+and returned as a reordered permutation at `temperature=0`. This is permutation generation, the
+core technique from RankGPT (Sun et al., EMNLP 2023, arXiv:2304.09542). Reranking is what moves
+MRR, from `0.521` to `0.609`.
 
-### The three changes that built the system — (sparse)
+A two-window sliding pass over the top 30, closer to full RankGPT, was measured. It improved Hit@10
+(`0.965` to `0.970`) and MTTC (`2.825` to `2.76`) but lost MRR (`0.609` to `0.592`), for a net
+score change of `-0.0013` at 1.95x the tokens and 1.87x the latency. That difference is smaller
+than the run-to-run variance in Limitations, so the single window ships on cost. Reproduce with
+`RERANK_DEPTH=30`.
 
-| Config | Hit@10 | MRR | MTTC | Score |
-|---|---|---|---|---|
-| BM25 baseline (organizer figure) | 0.125 | 0.068034 | 9.81 | 0.10671 |
-| + message history | 0.270 | 0.151381 | 8.60 | 0.228414 |
-| + `ask_attribute = "other"` | 0.875 | 0.540002 | 3.455 | 0.750401 |
-| + never re-show an offered item | **0.975** | **0.596835** | **2.87** | **0.829151** |
-
-### Ask policy — (hybrid)
-
-The gap this closes: the previous version of this document could say *what* we did but not *why it beat the alternative*, because the alternative had never been built.
-
-| Policy | Hit@10 | MRR | MTTC | Score |
-|---|---|---|---|---|
-| **`other`** (shipped) | **0.9650** | **0.521012** | **2.925** | **0.800304** |
-| `targeted` — real attributes, drain rule | 0.9500 | 0.505169 | 3.490 | 0.776751 |
-| `none` | 0.5400 | 0.216504 | 7.080 | 0.413351 |
-
-`targeted` is a genuine implementation, not a straw man: it walks the attribute list ordered by the measured frequencies above, and **drains** each attribute — asking `material` repeatedly until the customer says they have nothing more of that type — before advancing.
-
-It loses by `−0.0236`, and MTTC shows why: `2.925 → 3.490`, half a turn slower per session. Asking about `color` in the 74% of sessions with no colour fact returns nothing at all.
-
-**There is also a proof, which is stronger than the measurement.** At [`line 178`](../evaluator/local_evaluator.py#L178), `"other"` returns the first two undisclosed facts of *any* type; a targeted ask returns the first two of *one* type — a subset of the same list. So `"other"` discloses at least as much as any targeted question, on every turn, in every session. Targeted asking is not merely worse here; it is mathematically incapable of winning. No attribute ordering can change that.
-
-### Result-count shapes — (hybrid)
-
-Whether to return fewer than 10 while still under-informed, so less of the 100-slot budget (10 turns × 10 items) is spent on blind early guesses.
-
-| Shape | Hit@10 | MRR | MTTC | Score |
-|---|---|---|---|---|
-| **`full`** — always 10 (shipped) | **0.9650** | 0.521012 | 2.925 | **0.800304** |
-| `turn1_small` — 3 on turn 1 only | 0.9650 | 0.534520 | 3.015 | 0.802556 |
-| `ramp_turn` — `2 + turn`, capped | 0.9500 | **0.649677** | 3.425 | **0.821403** |
-| `ramp_facts` — `3 + 3 × facts known` | 0.9400 | 0.624339 | 3.315 | 0.811002 |
-
-**`ramp_turn` scores highest and is deliberately not shipped.** The reasoning is in Tradeoffs below — it is the one place where the highest number is not the chosen configuration.
-
-### Retrieval routes — (hybrid vs sparse)
-
-| Route | Hit@10 | MRR | MTTC | Score |
-|---|---|---|---|---|
-| Sparse only (BM25) | **0.9750** | **0.596835** | **2.870** | **0.829151** |
-| Hybrid (BM25 + dense, RRF) — shipped | 0.9650 | 0.521012 | 2.925 | 0.800304 |
-| Dense only | 0.5400 | 0.232587 | 6.890 | 0.421976 |
-
-Recorded honestly: **on the public set, sparse-only outscores the hybrid system by `0.029`.** Discussed under Tradeoffs.
-
-### Per scenario, shipped system — (hybrid)
-
-| Scenario | n | Hit@10 | MRR | MTTC |
-|---|---|---|---|---|
-| buying | 80 | 0.9625 | 0.511374 | 2.4625 |
-| browsing | 80 | 0.9750 | 0.505288 | 2.7125 |
-| intent_override | 30 | 0.9333 | 0.525648 | 4.5000 |
-| boundary | 10 | 1.0000 | 0.710000 | 3.6000 |
-
-Browsing was the baseline's largest hole — Hit@10 `0.025` across 40% of all sessions — because those sessions open with *"I'm looking for X, but I'm still exploring"* and disclose nothing. An agent that never asks is completely starved. It is now among the strongest categories.
-
-### Failure analysis — (sparse)
-
-All 25 misses at the `0.750401` configuration were diagnosed by re-running each session's final query to depth 2000:
-
-| Cause | Count |
-|---|---|
-| Target retrieved but ranked below 10 | **25** |
-| Target never retrieved | **0** |
-
-**Not one failure was a retrieval failure.** Recall by depth:
-
-| Depth | 10 | 30 | 100 | 500 |
-|---|---|---|---|---|
-| Ceiling on Hit@10 | 0.875 | 0.925 | 0.975 | **1.000** |
-
-BM25 alone finds every target within its top 500. This single table reset the project's priorities: **the remaining work is ordering, not recall.** It also sets the depth a reranker must consider — reranking only the top 30 would cap Hit@10 at 0.925, *below where the system already scores*.
-
-The sessions still missed have targets at true ranks 110, 110, 125, 146 and 315 — beyond the 100 items reachable in 10 turns of 10. No reranker can recover them, because they never enter the candidate pool.
-
-### Guardrails, proven by fault injection
-
-An unexercised guardrail is not a working guardrail. The evaluator swallows agent exceptions silently ([`line 241`](../evaluator/local_evaluator.py#L241)) and substitutes an empty list, so a crash is an invisible miss rather than an error message. We therefore both **count** exceptions and **inject** them.
-
-Every run now ends with a line on stderr:
+### Retrieval flow and the offline fallback
 
 ```
-[agent] exceptions caught: 0 (search=0, respond=0)
+query -> BM25 top 120  ----\
+                            >-- reciprocal rank fusion -- top 120
+query -> dense top 120 ----/                |
+                                            v
+                              RERANK_MODEL set and call succeeds?
+                                   |                      |
+                                  yes                     no
+                                   |                      |
+                          listwise LLM rerank      fused order unchanged
+                                   |                      |
+                                   \----------> ten ASINs after paging
 ```
 
-Injecting a fault into every third query build, at a 33% failure rate:
+The fallback is the fused reciprocal-rank-fusion order, which is a complete working ranking on its
+own rather than a degraded mode. Three conditions trigger it:
 
-| | Score | Turns returning nothing |
-|---|---|---|
-| With guards | **0.784111** | **0** |
-| Without guards | 0.742808 | 273 |
+1. `RERANK_MODEL` is unset, which is the state of a fresh clone with no API key. No call is
+   attempted and no tokens are used.
+2. Any API call raises, including a bad key, rate limit, timeout, or network failure. The agent
+   prints one line to stderr, disables reranking for the rest of the process, and continues on the
+   fused order.
+3. The model returns a malformed reply. `parse_order` keeps only valid in-range indices and
+   backfills the rest, so a garbage response degrades to a partial reordering rather than dropping
+   or duplicating a product.
 
-The guards are worth `+0.041` under that fault rate, and eliminate empty responses entirely — including on turn 1, where there is no previous ranking to fall back on, via a warm-up ranking captured at startup.
+If the embedding index is also missing, `interface.init` catches it, prints a warning naming the
+build command, and runs BM25 only. There is no configuration in which the agent fails to return ten
+results.
 
-**ASIN validation is now implemented and tested the same way.** Every candidate is checked against the loaded catalog before it can occupy one of the ten returned slots — closing the one guardrail from `AGENTS.md`'s list that had been built but never proven. We tested it against a simulated hallucinating reranker, injecting 3 and then 7 fake IDs (of 10 slots) at the front of the ranking every turn — the position a bad reranker would place them, having judged them "best":
+## Setup and installation
 
-| Poisoning | Hit@10, filter off | Hit@10, filter on | Score, off | Score, on |
-|---|---|---|---|---|
-| 3 of 10 fake | 0.9600 | **0.9650** | **0.801874** | 0.800304 |
-| 7 of 10 fake | 0.9600 | **0.9650** | **0.802080** | 0.800304 |
+Python 3.11 or newer, developed and measured on 3.12.10. All commands run from the repository root.
 
-**Hit@10 is consistently better with the filter on**, at both poisoning levels — the expected mechanism: fake IDs no longer occupy a slot a real candidate could have used. The composite score is very slightly lower with the filter on, by almost exactly the same small amount (`~-0.0017`) regardless of whether 30% or 70% of candidates are hallucinated. That consistency identifies the cause: it is the same MRR-inflation-via-paging effect disclosed below, not a cost that scales with how badly a reranker fails. We ship the filter anyway — Hit@10 is 50% of the score and the mechanism protecting it is unambiguous, while the tiny score offset is bounded, explained, and not a reason to skip basic output validation.
+### 1. Catalog
 
-We also found and fixed a related gap while building this test: the warm-up ranking fetched at startup (the very-first-turn fallback) was never itself validated against the catalog. If retrieval were broken from the first call, the fallback could have been poisoned too. It is now filtered the same way as every other candidate list.
+Not committed. Download `catalog.jsonl.gz` from the challenge GitHub Release and decompress it to
+`data/catalog.jsonl` (50,000 rows). The path is read from `CATALOG_PATH`.
 
-### MRR inflation from paging, disclosed — (sparse)
-
-Never re-showing an item inflates MRR: if 40 items have been excluded over earlier turns and the target then lands at position 1, the evaluator records rank 1 for something whose true unfiltered rank was 41. We recovered every hit's true rank to quantify it:
-
-| Measure | Value |
-|---|---|
-| MRR as scored | 0.596835 |
-| MRR at true unfiltered rank | 0.534539 |
-| **Inflation** | **+0.062297** |
-| Hits requiring paging | 27 of 195 (14%) |
-
-At MRR's 30% weight that is `+0.0187` of the change's `+0.0788` total gain — **about a quarter presentation, three quarters genuine** improvement in Hit@10 and time-to-hit, neither of which paging can fake.
-
----
-
-## Things we built, measured, and rejected
-
-Every one of these is a real implementation that lost. They are listed because a component that does not move a number has not earned its place, and saying so is stronger evidence of judgement than a longer feature list.
-
-| Variant | Score | Δ vs its base | Why rejected |
-|---|---|---|---|
-| Targeted ask policy with drain rule | 0.776751 | −0.024 | `other` is a strict superset of any single-attribute ask — see the proof above |
-| `ramp_turn` result count | 0.821403 | **+0.021** | Highest score, still rejected — see Tradeoffs |
-| `ramp_facts` result count | 0.811002 | +0.011 | Same reason, smaller gain, worse Hit@10 |
-| Query reordered newest-first | 0.750401 | 0.000 | BM25 ignores word order; the 40-term cap it was meant to dodge affects only 1.8% of queries |
-| Drop no-information replies from query | 0.736251 | −0.014 | Removing terms narrowed BM25's match set more than it removed noise |
-| Erase superseded history on override | 0.736494 | −0.014 | The "abandoned" preference is still true of the target — see below |
-| Both of the above | 0.715657 | −0.035 | |
-| Profile seeding (`preference_tags`) | 0.737643 | −0.013 | Tags are generic (`fit`, `comfort`, `durability`) and dilute the query |
-
-**The override finding contradicts standard dialogue-state practice, and is worth stating plainly.** In an intent-override session the customer says *"actually, ignore my earlier preference"* — but the evaluator builds that earlier preference from the target product's own `soft_preferences` ([`line 79`](../evaluator/local_evaluator.py#L79)). The abandoned constraint is still a true description of the product being hunted. **Forgetting it destroys evidence.** The agent therefore detects overrides — 30 of 30 genuine ones caught — and uses them to reset the shown-item set, but deliberately does **not** erase the accumulated query.
-
----
-
-## Tradeoffs and open decisions
-
-### 1. We ship `full` result counts despite `ramp_turn` scoring higher
-
-`ramp_turn` scores `0.821403` against our shipped `0.800304`. We do not ship it, for three reasons:
-
-- **It buys MRR with Hit@10.** Hit@10 falls `0.965 → 0.950`; those are real sessions where the target was in our candidate list and we chose not to show it. Hit@10 is 50% of the score, MRR is 30%.
-- **Its gain is largely the paging effect again, not better ranking.** Shrinking a list cannot reorder it — the item ranked fifth is still ranked fifth, merely hidden. The MRR rises because hidden items are not marked as shown and resurface higher later. It is the same mechanism as never-re-showing, applied harder, and it carries the same disclosure caveat.
-- **It competes with work already planned.** Reranking is the intended MRR lever and can do it properly, by genuinely reordering candidates. Spending Hit@10 now to buy MRR that reranking will deliver anyway risks paying twice for one gain.
-
-If reranking lands and Hit@10 still has headroom, this decision should be revisited *on top of* that work rather than instead of it. All shapes remain reproducible behind `RESULTS=`.
-
-### 2. Hybrid retrieval currently scores below sparse-only
-
-Sparse-only scores `0.829151`; the shipped hybrid scores `0.800304`. The team's position, recorded for transparency:
-
-- The public set appears skewed toward literal keyword matching, which is expected — the customer discloses near-verbatim catalog text, which is exactly BM25's strongest case.
-- The dense route is retained for **robustness, not recall**. [`competition_specification.md:40`](../docs/competition_specification.md#L40) states the organizers may add natural-language paraphrasing. Our current score leans heavily on the customer quoting product text verbatim; if that text is paraphrased for the private set, keyword matching weakens and the dense route is what degrades gracefully.
-- Recall is demonstrably *not* the justification: BM25 alone already reaches recall `1.000` at depth 500, so dense retrieval cannot add reachable targets. This is worth stating explicitly, because the original plan's gate for dense retrieval ("move Hit@10 above 0.875") was written before that measurement existed and is not achievable on those grounds.
-
-Switch with `RETRIEVAL=sparse`.
-
-### 3. Deterministic control flow instead of LLM self-planning
-
-The problem statement's "runtime workflow re-orchestration" was interpreted as **state-conditioned parameter adaptation**, not model self-planning. A self-modifying pipeline is non-deterministic, hard to debug, costs turns when it wanders, and cannot be explained to a judge asking "why did it do that?". The cost of this choice is that adaptation is limited to what we thought to encode; the benefit is that every number in this document is reproducible to six decimals.
-
----
-
-## Known bugs and limitations
-
-- **Ordering is the bottleneck, and part of it is unreachable.** Five sessions have targets at true ranks 110–315, past the 100 items any 10-turn session can show. Neither reranking nor better dialogue can recover them.
-- **Slot values are measurably inert; the override cue is not.** `NO_SLOTS=1` disables slot extraction and reproduces the score to six decimals (`0.800304`), because the query is built from raw message history and nothing reads the slots. What *is* load-bearing is the lexical override cue in the same file, which reads no slots at all: `OVERRIDE_RESET=0` costs **`0.104`** and collapses `intent_override` Hit@10 from `0.933` to `0.100`. Five further fields — `category`, `style`, `use_case`, `brand`, `budget` — were never set or read by anything and have been removed.
-
-- **The override cue is a keyword match, and we priced its failure.** Detection fires on `"actually"`, which the evaluator hardcodes into every override message ([`line 85`](../evaluator/local_evaluator.py#L85)) — generated by frozen code, not stored in the session data, so it is a property of the generator rather than of the 200 public sessions. The residual risk is [`line 205`](../evaluator/local_evaluator.py#L205), an escape hatch for sessions that ship a precomputed `behavior` field; the public set does not use it. A cue-independent fallback (`KEEP_TOP=2`, always resurfacing the top two candidates) recovers `0.752144` of the `0.696180` that total detection failure would cost, but costs `0.025` when detection works. Break-even is a ~45% chance of total failure, so it is measured and documented rather than shipped.
-- **`route()` is close to a constant.** Across 2000 routing decisions it returns `browsing` 90.7% of the time, and agrees with the evaluator's true scenario label on only 84 of 160 buying/browsing sessions. Its original `filled >= 3` slot-count branch was dead code — only `color` and `material` can ever be filled, so the condition could never be true — and has been removed; `route()` is now a pure keyword check, with identical behaviour (score unchanged at `0.800304`). Making a slot-count signal work would need `size` and `feature` added to `SlotState`, and `route()`'s only consumer is the RRF weighting.
-- **Two override false positives remain, from two different causes.** Multi-material listings were fixed (5 → 2 of 32 detections) by extracting every material in a message and testing membership instead of equality. What remains: (a) a material disclosed across two separate turns — shell on one, lining on another — which a single-valued slot cannot represent; (b) the word *"forget"* appearing in ordinary product prose (a greeting-card description), which trips the lexical override cue. The second is unrelated to materials and needs a narrower cue list.
-- **Attribute extraction covers colour and material only**, by regex over a closed vocabulary. The catalog has no `color` or `material` field — both exist only in free text.
-- **Measured on 200 public sessions with no held-out set.** The private 800 share the same generator and scenario mix. Nothing is fitted to individual sessions, and the one numeric parameter (`DEPTH`) has a saturating rather than peaked sensitivity curve, but transfer cannot be confirmed before submission.
-
----
-
-## Reproducing
-
-**Python 3.11 or newer** (developed and measured on 3.12.10). Every command below runs from the repository root.
+### 2. Dependencies
 
 ```bash
-# 1. Catalog. Not committed — download catalog.jsonl.gz from the challenge
-#    GitHub Release and decompress it to data/catalog.jsonl (50,000 rows).
-
-# 2. Dependencies.
 pip install -r requirements.txt
+```
 
-# 3. Embedding index. Needs network once, to download the encoder (~130MB).
+Pulls CPU-only PyTorch, about 200MB rather than 2.5GB. No GPU required.
+
+### 3. Embedding index
+
+```bash
 python -m starter.src.index_build
+```
 
-# 4. Run the official harness.
+Downloads the encoder (about 130MB) and writes `starter/assets/embeddings.npy` (50000 x 384),
+`asins.json` and `meta.json`. Needs network once. Idempotent, skips if the index already matches,
+`--force` rebuilds.
+
+Large assets are not committed. They are produced by this documented command and loaded from disk
+at startup rather than recomputed.
+
+This step is optional. Without it the agent prints a warning and runs BM25 only.
+
+### 4. LLM API key, optional
+
+Reranking stays off until a model is configured.
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`, uncomment one provider block, and paste your key:
+
+```
+RERANK_MODEL=openai/gpt-4o-mini
+OPENAI_API_KEY=sk-...
+```
+
+Any [litellm](https://docs.litellm.ai/docs/providers)-supported provider works. The model string
+selects the provider, so `gemini/gemini-3.6-flash` with `GEMINI_API_KEY`, or
+`groq/llama-3.3-70b-versatile` with `GROQ_API_KEY`, need no code change.
+
+**Without a key the agent runs normally.** No call is attempted, no tokens are used, and ranking
+falls back to the fused retrieval order. Both configurations are measured below.
+
+## Reproducing the results
+
+```bash
 python -m evaluator.local_evaluator
 ```
 
-That is the complete path and it needs **no API key** — step 4 scores `0.800304` on the fused retrieval order.
+Writes `results.json` and prints the metrics. With no `.env` present this reproduces the offline
+row. With `RERANK_MODEL` and a key set it reproduces the reranked row.
 
-To enable LLM reranking and reproduce `0.830369`, copy `.env.example` to `.env`, uncomment one provider block, and paste your key. Any [litellm](https://docs.litellm.ai/docs/providers)-supported provider works; we measured with `openai/gpt-4o-mini`. If the key is missing or any call fails, the agent logs one line to stderr and continues on the fused order — it never crashes and never blocks a run.
+To replay one session turn by turn:
 
-Skipping step 3 is also safe: `interface.init()` catches the missing index, prints a warning, and runs BM25-only.
+```bash
+python demo_session.py --scenario intent_override --index 1
+```
 
-`python run_eval.py --note "what changed"` runs the same evaluation and appends metrics, commit hash and note to `runs.log` — how every row above was produced.
+A captured four-turn override session is saved at [`demo_session.txt`](demo_session.txt). It shows
+the target unreachable on turn 1, ranked first on turn 2, pushed to rank 21 by the override on turn
+3, and recovered to rank 1 on turn 4.
 
-### Environment variables
+## Results
 
-| Variable | Default | Effect |
+Both rows are full 200-session runs on the same commit with the response cache disabled, so token
+counts are real rather than replayed.
+
+| | Reranked | Offline fallback |
 |---|---|---|
-| `CATALOG_PATH` | `data/catalog.jsonl` | Catalog location |
-| `RETRIEVAL` | `hybrid` | `sparse` or `dense` to isolate a route |
-| `ASK_POLICY` | `other` | `targeted` for attribute selection, `none` to disable asking |
-| `RESULTS` | `full` | `turn1_small`, `ramp_turn`, `ramp_facts` |
-| `EXPLORE` | `1` | `0` disables unseen-first selection |
-| `PROFILE_SEED` | `0` | `1` seeds the query with profile preference tags |
-| `DEPTH` | `120` | Candidates requested per turn |
-| `RERANK` | `1` | `0` disables LLM reranking, leaving the fused order |
-| `RERANK_MODEL` | *(unset)* | litellm model string, e.g. `openai/gpt-4o-mini`. Unset means no reranking |
-| `RERANK_TOP` | `20` | Candidates sent to the reranker |
-| `RERANK_EFFORT` | `low` | `reasoning_effort`, dropped for providers that reject it |
-| `LLM_CACHE` | `0` | `1` caches replies on disk. Development only — a cached run under-reports token usage |
-| `NO_SLOTS` | `0` | `1` disables slot extraction entirely |
-| `OVERRIDE_RESET` | `1` | `0` disables override detection and the paging reset |
-| `KEEP_TOP` | `0` | `n` always resurfaces the top `n` candidates even if already shown |
+| Model | `openai/gpt-4o-mini` | none |
+| **Score** | **0.828623** | **0.800304** |
+| Hit@10 | 0.965 | 0.965 |
+| MRR | 0.608742 | 0.521012 |
+| MTTC | 2.825 | 2.925 |
+| Prompt tokens | 514,026 | 0 |
+| Completion tokens | 32,068 | 0 |
+| Estimated cost | $0.096 per run, $0.0005 per session | $0.00 |
+| Latency p50 / p95 | 1188 ms / 1697 ms | 47 ms / 94 ms |
+| Wall clock, 200 sessions | 11.6 min | 28.5 s |
+| Exceptions | 0 | 0 |
 
-Every flag exists so that a row of the tables above can be reproduced without editing source.
+Cost uses gpt-4o-mini list rates of $0.15 per 1M input and $0.60 per 1M output tokens, applied to
+the measured counts above. Reranking averages 979 tokens per turn across 558 turns.
 
-**`DEPTH` is not finely tuned** — (sparse):
+Startup is about 17s in both rows, loading the encoder and the embedding matrix. It is excluded
+from per-turn latency because it happens once per process, not per session.
 
-| DEPTH | 20 | 40 | 60 | **80** | 100 | 120 | 200 |
-|---|---|---|---|---|---|---|---|
-| Score | 0.7995 | 0.8081 | 0.8146 | **0.8292** | 0.8292 | 0.8292 | 0.8292 |
+Reranking buys `+0.028` score, almost entirely MRR, for 25x per-turn latency and about ten cents
+per evaluation.
 
-Saturating, not peaked — identical to six decimals at 80 through 1000. The ceiling is structural: at most 10 items over at most 10 turns means no more than 100 candidates can ever be consumed. The shipped 120 sits 50% above saturation.
+## Limitations
 
-### Verification performed
+- **Reranking is not bit-deterministic.** Replaying cached model responses scored `0.830369` while
+  a fresh sampling of the same prompts at `temperature=0` scored `0.828623`. The cold number is
+  published. Expect run-to-run variation of roughly `0.002`.
+- **Slot values do not affect the score.** Dialogue state tracking is implemented, but the query is
+  built from raw message history, so `NO_SLOTS=1` reproduces the score exactly. Slot state
+  influences only the shown-item reset on override.
+- **Override detection is a keyword match.** It fires on "actually", which the evaluator hardcodes
+  into every override message and generates from frozen code rather than storing in session data.
+  A paraphrased override on the private set would cost up to `0.104`. A cue-independent fallback
+  (`KEEP_TOP=2`) was measured and recovers most of that, but costs `0.025` when detection works, so
+  it is not shipped.
+- **Hit@10 is structurally capped near `0.975`.** Five targets sit at true ranks 110 to 315, past
+  the 100 items any 10-turn session can display. Neither reranking nor better dialogue reaches them.
+- **Attribute extraction covers colour and material only**, by regex over a closed vocabulary. The
+  catalog has no `color` or `material` field; both exist in free text only.
+- **Measured on the 200 public sessions with no held-out set.** The private 800 share the same
+  generator and scenario mix, but transfer cannot be confirmed before submission.
 
-- **No label leakage.** No file in `starter/` references `ground_truth`, `public_set`, `sample_id`, `intent_card`, `behavior` or `scenario_type`; the only file the agent opens is the catalog. Replacing every customer message with a fixed string collapses the score from `0.800304` to `0.020412` — below the provided baseline — confirming performance comes from the conversation rather than a leak.
-- **No cross-session state.** All 200 sessions re-run in shuffled order: 0 of 200 outcomes changed.
-- **Contract compliance.** 0 violations across 200 sessions — message always a string, `ask_attribute` always in the enum, 10 unique catalog-valid ASINs, never empty, never exceeding 10 turns.
-- **Determinism.** Repeated runs identical to six decimal places.
-- **Frozen paths untouched.** `evaluator/`, `docs/`, `data/`, `tests/` byte-identical to upstream.
+## Tech stack
 
-### Network, latency, and cost
-
-**The system runs in two modes, and both are supported.** With no `RERANK_MODEL` set — the state of a fresh clone with no API key — there are **no runtime network calls and zero LLM tokens**, `prompt_tokens: 0, completion_tokens: 0`, cost **$0.00**, and the score is `0.800304`. With a model configured it makes one listwise call per turn, scoring `0.830369`.
-
-Setup-time network is required once either way, to download the encoder weights (~130MB) — the same requirement as `pip install`.
-
-*Token and cost disclosure for the reranking mode is pending a cold-cache run; the figure in the current `results.json` was produced with `LLM_CACHE=1` and reflects one uncached call, not the true cost.*
-
-Per-turn latency, measured across all 578 turns of a full 200-session evaluation on a laptop CPU (dialogue state, query construction, hybrid retrieval, and control policy — no network call in the loop):
-
-| | Latency |
+| Layer | Choice |
 |---|---|
-| Mean | 32.45 ms |
-| Median (p50) | 30.86 ms |
-| **p95** | **58.76 ms** |
-| p99 | 76.19 ms |
-| Max | 86.20 ms |
+| Language | Python 3.12.10 |
+| Sparse retrieval | SQLite FTS5 with BM25 ranking, standard library |
+| Dense retrieval | `sentence-transformers` 6.0.0, `BAAI/bge-small-en-v1.5`, pinned revision |
+| Vectors | `numpy` 2.5.2, exact cosine over a 50000 x 384 matrix |
+| Compute | `torch` 2.13.0+cpu, CPU only |
+| LLM routing | `litellm` 1.98.0, provider selected by model string |
+| Reranking model | `openai/gpt-4o-mini` |
+| Configuration | `python-dotenv` 1.2.3 |
 
-A full 200-session evaluation completes in about 27 seconds, including building the SQLite FTS5 index and loading the embedding matrix into memory; it does not include the one-time dense index build (`python -m starter.src.index_build`, ~3 minutes, run once and cached).
-
-If reranking is added on top of this, its latency and token cost are additive to the numbers above and will be disclosed separately once implemented.
-
----
+No vector database, no agent framework, no fine-tuning, no training.
 
 ## Team contributions
 
-- **Person A** — retrieval: BM25 index, dense retrieval, RRF fusion, index build, reranking.
-- **Person B** — dialogue: control policy, dialogue state tracking, query construction, ask policy, routing, guardrails, evaluation harness, failure analysis and verification.
+- **Person A**, retrieval: BM25 index, dense retrieval, RRF fusion, offline index build, reranking.
+- **Person B**, dialogue: control policy, dialogue state tracking, query construction, ask policy,
+  routing, guardrails, evaluation harness, failure analysis.
