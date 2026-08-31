@@ -19,3 +19,4 @@ tests/test_organizer_pipeline.py
 starter/assets/
 submission/assets/
 .venv/
+.claude/

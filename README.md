@@ -170,7 +170,7 @@ results.
 
 ## Setup and installation
 
-Python 3.11 or newer, developed and measured on 3.12.10.
+Python 3.11 or newer, developed and measured on 3.12.10. All commands run from the repository root.
 
 ### From a fresh clone, start to finish
 
@@ -178,24 +178,37 @@ Python 3.11 or newer, developed and measured on 3.12.10.
 git clone <repo-url>
 cd techjam26_inittowinit
 
+# 1. Catalog. Download catalog.jsonl.gz from the challenge GitHub Release and
+#    decompress it to data/catalog.jsonl (50,000 rows).
+
+# 2. Dependencies.
 python -m venv .venv
 .venv/Scripts/activate            # Windows
 # source .venv/bin/activate       # macOS or Linux
-
 pip install -r requirements.txt
 
-# catalog: download catalog.jsonl.gz from the challenge GitHub Release,
-# decompress to data/catalog.jsonl (50,000 rows)
+# 3. Embedding index. Encoder download plus 50,000 vectors, about 3 minutes, once.
+python -m starter.src.index_build
 
-python -m starter.src.index_build          # encoder + embeddings, ~3 min, once
-cp .env.example .env                       # then paste your API key into .env
-python -m evaluator.local_evaluator        # writes results.json
+# 4. LLM API key. Copy the template, then paste your key into .env.
+cp .env.example .env
+
+# Run the official harness.
+python -m evaluator.local_evaluator
 ```
 
-Expect `0.828623` with a key configured, `0.800304` without. Each step is explained below.
+Expect close to `0.828623` with a key configured, and exactly `0.800304` without. Each numbered
+step is expanded below.
 
-Asset paths resolve against the package rather than the working directory, so the agent can be
-imported and run from anywhere once the index is built.
+**The reranked score is not exactly reproducible, even with the same key and model.** The reranker
+calls an LLM, and providers do not guarantee identical output at `temperature=0`. Two samplings of
+the same prompts differed by about `0.002` for us. Expect a number near `0.828623` rather than that
+figure to six decimals. The offline path uses no model and is exactly reproducible.
+
+Once the index is built, the agent itself can be imported and run from any working directory: asset
+paths resolve against the package rather than the process. The commands above still expect the
+repository root, since they resolve `starter` as a module and `data/catalog.jsonl` as a relative
+path.
 
 ### 1. Catalog
 
@@ -294,6 +307,10 @@ replayed.
 | Latency p50 / p95 | 1188 ms / 1697 ms | 47 ms / 94 ms |
 | Wall clock, 200 sessions | 11.6 min | 28.5 s |
 | Exceptions | 0 | 0 |
+
+Reproducing the left column will land near `0.828623` rather than on it: the reranker calls an
+LLM, and providers do not guarantee identical output at `temperature=0`. The right column uses no
+model and reproduces exactly.
 
 Cost uses gpt-4o-mini list rates of $0.15 per 1M input and $0.60 per 1M output tokens, applied to
 the measured counts above. Reranking averages 979 tokens per turn across 558 turns.
