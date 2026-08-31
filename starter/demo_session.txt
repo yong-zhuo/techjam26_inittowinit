@@ -1,0 +1,20 @@
+
+public_0003  (intent_override)
+target B09YMTWDXJ  Casio Men's Wrist Watch AQ-800E-7A
+
+turn 1  [browsing]  candidate_rank=-  shown=-  query_terms=9
+  customer: I'm looking for Watches Wrist Watches. Stainless Steel Band
+  agent:    Here are the closest matches so far. What else matters to you?  (ask_attribute='other')
+
+turn 2  [buying]  candidate_rank=1  shown=1  query_terms=18
+  customer: For that, what matters is: Water Resistant; 3 Year Battery.
+  agent:    Here are the closest matches so far. What else matters to you?  (ask_attribute='other')
+
+turn 3  [browsing]  candidate_rank=21  shown=-  query_terms=26
+  customer: Actually, ignore my earlier preference. What I need is: Water Resistant.
+  agent:    Here are the closest matches so far. What else matters to you?  (ask_attribute='other')
+
+turn 4  [browsing]  candidate_rank=1  shown=1  query_terms=31
+  customer: For that, what matters is: Day / Date Indicator; Stainless Steel Band.
+  agent:    Here are the closest matches so far. What else matters to you?  (ask_attribute='other')
+
